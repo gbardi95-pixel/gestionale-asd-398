@@ -1,0 +1,249 @@
+import sqlite3
+import os
+
+DB_PATH = os.path.join("data", "contabilita_asd.db")
+
+def get_connection():
+    """Crea la cartella data/ se non esiste e restituisce la connessione SQLite."""
+    os.makedirs("data", exist_ok=True)
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def init_db():
+    """Inizializza tutte le tabelle del database per l'ASD Calcio a 11 in Regime 398/98."""
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    # Enable Foreign Keys in SQLite
+    cursor.execute("PRAGMA foreign_keys = ON;")
+
+    # ==========================================
+    # 1. PIANO DEI CONTI (Struttura ad Albero)
+    # ==========================================
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS piano_dei_conti (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        codice TEXT NOT NULL UNIQUE,
+        nome TEXT NOT NULL,
+        tipo TEXT CHECK(tipo IN ('ATTIVITA', 'PASSIVITA', 'NETTO', 'COSTO', 'RICAVO')),
+        livello INTEGER CHECK(livello IN (1, 2, 3)),
+        attivo INTEGER DEFAULT 1
+    );
+    """)
+
+    # ==========================================
+    # 2. ANAGRAFICA GENERALE
+    # ==========================================
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS anagrafiche (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        tipo TEXT CHECK(tipo IN ('SOCIO_CALCIATORE', 'SPONSOR', 'FORNITORE', 'COLLABORATORE_SPORTIVO', 'ALTRO')),
+        denominazione TEXT NOT NULL,
+        codice_fiscale TEXT,
+        partita_iva TEXT,
+        email TEXT,
+        telefono TEXT,
+        indirizzo TEXT,
+        comune TEXT,
+        cap TEXT,
+        provincia TEXT,
+        note TEXT
+    );
+    """)
+
+    # ==========================================
+    # 3. DETTAGLIO TESSERATI CALCIO A 11
+    # ==========================================
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS tesserati_calcio (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        anagrafica_id INTEGER NOT NULL REFERENCES anagrafiche(id) ON DELETE CASCADE,
+        matricola_figc TEXT,
+        categoria TEXT CHECK(categoria IN ('PRIMA_SQUADRA', 'JUNIORES', 'ALLIEVI', 'GIOVANISSIMI', 'SCUOLA_CALCIO', 'STAFF')),
+        ruolo TEXT, -- Es: Portiere, Difensore, Centrocampista, Attaccante, Allenatore
+        data_tesseramento TEXT,
+        quota_stagionale REAL DEFAULT 0.00,
+        stato TEXT DEFAULT 'ATTIVO' CHECK(stato IN ('ATTIVO', 'INATTIVO', 'IN_PRESTITO'))
+    );
+    """)
+
+    # ==========================================
+    # 4. CERTIFICATI MEDICI AGONISTICI
+    # ==========================================
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS certificati_medici (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        anagrafica_id INTEGER NOT NULL REFERENCES anagrafiche(id) ON DELETE CASCADE,
+        tipo TEXT CHECK(tipo IN ('AGONISTICO', 'NON_AGONISTICO')) DEFAULT 'AGONISTICO',
+        data_rilascio TEXT NOT NULL,
+        data_scadenza TEXT NOT NULL,
+        medico_certificatore TEXT,
+        stato_idoneita TEXT DEFAULT 'IDONEO' CHECK(stato_idoneita IN ('IDONEO', 'NON_IDONEO', 'IN_ATTESA')),
+        note TEXT
+    );
+    """)
+
+    # ==========================================
+    # 5. RICEVUTE ISTITUZIONALI (Art. 4 DPR 633/72)
+    # ==========================================
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS ricevute_istituzionali (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        numero_ricevuta TEXT NOT NULL,
+        data_emissione TEXT NOT NULL,
+        anagrafica_id INTEGER NOT NULL REFERENCES anagrafiche(id),
+        causale TEXT NOT NULL, -- Es: Quota iscrizione Campionato Calcio a 11 2026/2027
+        importo REAL NOT NULL,
+        modalita_pagamento TEXT CHECK(modalita_pagamento IN ('CONTANTI', 'BONIFICO', 'POS', 'PAYPAL')),
+        marca_da_bollo REAL DEFAULT 0.00, -- 2,00€ se importo > 77,47€
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    """)
+
+    # ==========================================
+    # 6. FATTURE SPONSOR & PUBBLICITÀ (Regime 398/98)
+    # ==========================================
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS fatture_sponsor_398 (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        numero_fattura TEXT NOT NULL,
+        data_fattura TEXT NOT NULL,
+        sponsor_id INTEGER NOT NULL REFERENCES anagrafiche(id),
+        oggetto_contratto TEXT NOT NULL, -- Es: Sponsorizzazione maglie Prima Squadra / Cartellonistica campo
+        imponibile REAL NOT NULL,
+        aliquota_iva REAL DEFAULT 22.0,
+        iva_totale REAL NOT NULL,
+        totale_fattura REAL NOT NULL,
+        iva_da_versare_50 REAL NOT NULL, -- Calcolo automatico: 50% dell'IVA totale
+        stima_ires_3 REAL NOT NULL,      -- Calcolo automatico: 3% dell'imponibile
+        note TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    """)
+
+    # ==========================================
+    # 7. FATTURE PASSIVE E ACQUISTI
+    # ==========================================
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS fatture_passive (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        fornitore_id INTEGER NOT NULL REFERENCES anagrafiche(id),
+        numero_doc TEXT NOT NULL,
+        data_doc TEXT NOT NULL,
+        causale_spesa TEXT NOT NULL, -- Es: Affitto campo di gioco, Tasse gara FIGC, Materiale tecnico
+        imponibile REAL NOT NULL,
+        iva REAL DEFAULT 0.00,
+        totale REAL NOT NULL,
+        categoria_spesa TEXT -- Es: STRUTTURA, MATERIALE_SPORTIVO, TESSERAMENTI_FIGC, SANITARIO
+    );
+    """)
+
+    # ==========================================
+    # 8. LAVORO SPORTIVO & COLLABORATORI (D.Lgs. 36/2021)
+    # ==========================================
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS collaboratori_sportivi (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        anagrafica_id INTEGER NOT NULL REFERENCES anagrafiche(id),
+        mansione TEXT NOT NULL, -- Es: Allenatore Prima Squadra, Preparatore Atletico, Massaggiatore
+        tipo_contratto TEXT CHECK(tipo_contratto IN ('VOLONTARIO_RIMBORSO', 'CO.CO.CO_SPORTIVO', 'PARTITA_IVA')),
+        compenso_pattuito REAL DEFAULT 0.00
+    );
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS compensi_sportivi (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        collaboratore_id INTEGER NOT NULL REFERENCES collaboratori_sportivi(id),
+        data_erogazione TEXT NOT NULL,
+        causale TEXT NOT NULL,
+        importo_lordo REAL NOT NULL,
+        progressivo_inps_anno REAL NOT NULL, -- Monitoraggio franchigia € 5.000,00
+        progressivo_irpef_anno REAL NOT NULL, -- Monitoraggio franchigia € 15.000,00
+        ritenuta_inps REAL DEFAULT 0.00,
+        ritenuta_irpef REAL DEFAULT 0.00,
+        importo_netto REAL NOT NULL
+    );
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS rimborsi_trasferta (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        anagrafica_id INTEGER NOT NULL REFERENCES anagrafiche(id),
+        data_partita TEXT NOT NULL,
+        incontro_calcio TEXT NOT NULL, -- Es: ASD Ameglia vs Spezia Calcio
+        luogo_trasferta TEXT NOT NULL,
+        km_percorsi REAL DEFAULT 0.00,
+        tariffa_aci REAL DEFAULT 0.00,
+        spese_pie_di_lista REAL DEFAULT 0.00,
+        totale_rimborso REAL NOT NULL
+    );
+    """)
+
+    # ==========================================
+    # 9. SCADENZARIO (INCASSI / PAGAMENTI)
+    # ==========================================
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS scadenzario (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        tipo TEXT CHECK(tipo IN ('INCASSO_SPONSOR', 'INCASSO_QUOTA', 'PAGAMENTO_FORNITORE', 'PAGAMENTO_COLLABORATORE')),
+        riferimento_id INTEGER, -- ID fattura, ricevuta o compenso
+        data_scadenza TEXT NOT NULL,
+        importo REAL NOT NULL,
+        importo_pagato REAL DEFAULT 0.00,
+        stato TEXT DEFAULT 'APERTO' CHECK(stato IN ('APERTO', 'PARZIALE', 'SALDATO'))
+    );
+    """)
+
+    # ==========================================
+    # 10. PRIMA NOTA & PARTITA DOPPIA
+    # ==========================================
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS movimenti_prima_nota (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        data_registrazione TEXT NOT NULL,
+        numero_documento TEXT,
+        causale TEXT NOT NULL,
+        tipo_attivita TEXT CHECK(tipo_attivita IN ('ISTITUZIONALE', 'COMMERCIALE_398')) DEFAULT 'ISTITUZIONALE'
+    );
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS righe_prima_nota (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        movimento_id INTEGER NOT NULL REFERENCES movimenti_prima_nota(id) ON DELETE CASCADE,
+        sottoconto_id INTEGER NOT NULL REFERENCES piano_dei_conti(id),
+        descrizione TEXT,
+        dare REAL DEFAULT 0.00,
+        avere REAL DEFAULT 0.00
+    );
+    """)
+
+    # ==========================================
+    # 11. MOVIMENTI ESTRATTO CONTO (BANCA / PAYPAL)
+    # ==========================================
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS estratti_conto_importati (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        fonte TEXT CHECK(fonte IN ('BANCA', 'PAYPAL')),
+        data_transazione TEXT NOT NULL,
+        descrizione TEXT NOT NULL,
+        importo_lordo REAL NOT NULL,
+        commissione REAL DEFAULT 0.00,
+        importo_netto REAL NOT NULL,
+        stato_riconciliazione TEXT DEFAULT 'DA_RICONCILIARE' CHECK(stato_riconciliazione IN ('DA_RICONCILIARE', 'RICONCILIATO'))
+    );
+    """)
+
+    # Indici per velocizzare le ricerche delle scadenze e dei certificati
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_cert_scadenza ON certificati_medici(data_scadenza);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_scad_stato ON scadenzario(stato);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_tesserato_cat ON tesserati_calcio(categoria);")
+
+    conn.commit()
+    conn.close()
+
+if __name__ == "__main__":
+    init_db()
+    print("Database SQLite ASD Calcio 398/98 inizializzato con successo!")
