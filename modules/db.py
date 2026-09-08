@@ -1,26 +1,58 @@
-import sqlite3
 import os
-
-DB_PATH = os.path.join("data", "contabilita_asd.db")
+import sqlite3
+import streamlit as st
 
 def get_connection():
-    """Crea la cartella data/ se non esiste e restituisce la connessione SQLite."""
+    """
+    Stabilisce la connessione al database:
+    1. Se sono presenti le chiavi Turso in st.secrets, usa Turso Cloud DB (libsql).
+    2. Altrimenti ripiega sul database SQLite locale in data/contabilita_asd.db.
+    """
+    turso_url = None
+    turso_token = None
+
+    # Lettura da st.secrets (Streamlit Cloud o .streamlit/secrets.toml)
+    try:
+        if hasattr(st, "secrets"):
+            turso_url = st.secrets.get("TURSO_DATABASE_URL")
+            turso_token = st.secrets.get("TURSO_AUTH_TOKEN")
+    except Exception:
+        pass
+
+    # Lettura da variabili d'ambiente (fallback)
+    if not turso_url:
+        turso_url = os.environ.get("TURSO_DATABASE_URL")
+        turso_token = os.environ.get("TURSO_AUTH_TOKEN")
+
+    # Se le credenziali Turso esistono, connetti al Cloud
+    if turso_url and turso_token:
+        try:
+            import libsql_experimental as libsql
+            conn = libsql.connect(database=turso_url, auth_token=turso_token)
+            return conn
+        except Exception as e:
+            st.error(f"Errore di connessione a Turso Cloud DB: {e}")
+
+    # Fallback su SQLite Locale
     os.makedirs("data", exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+    db_path = os.path.join("data", "contabilita_asd.db")
+    conn = sqlite3.connect(db_path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
+
 
 def init_db():
     """Inizializza tutte le tabelle del database per l'ASD Calcio a 11 in Regime 398/98."""
     conn = get_connection()
     cursor = conn.cursor()
 
-    # Enable Foreign Keys in SQLite
-    cursor.execute("PRAGMA foreign_keys = ON;")
+    # Enable Foreign Keys
+    try:
+        cursor.execute("PRAGMA foreign_keys = ON;")
+    except Exception:
+        pass
 
-    # ==========================================
-    # 1. PIANO DEI CONTI (Struttura ad Albero)
-    # ==========================================
+    # 1. Piano dei Conti
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS piano_dei_conti (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -32,9 +64,7 @@ def init_db():
     );
     """)
 
-    # ==========================================
-    # 2. ANAGRAFICA GENERALE
-    # ==========================================
+    # 2. Anagrafica Generale
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS anagrafiche (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -42,6 +72,7 @@ def init_db():
         denominazione TEXT NOT NULL,
         codice_fiscale TEXT,
         partita_iva TEXT,
+        codice_destinatario TEXT DEFAULT '0000000',
         email TEXT,
         telefono TEXT,
         indirizzo TEXT,
@@ -52,25 +83,21 @@ def init_db():
     );
     """)
 
-    # ==========================================
-    # 3. DETTAGLIO TESSERATI CALCIO A 11
-    # ==========================================
+    # 3. Tesserati Calcio a 11
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS tesserati_calcio (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         anagrafica_id INTEGER NOT NULL REFERENCES anagrafiche(id) ON DELETE CASCADE,
         matricola_figc TEXT,
         categoria TEXT CHECK(categoria IN ('PRIMA_SQUADRA', 'JUNIORES', 'ALLIEVI', 'GIOVANISSIMI', 'SCUOLA_CALCIO', 'STAFF')),
-        ruolo TEXT, -- Es: Portiere, Difensore, Centrocampista, Attaccante, Allenatore
+        ruolo TEXT,
         data_tesseramento TEXT,
         quota_stagionale REAL DEFAULT 0.00,
         stato TEXT DEFAULT 'ATTIVO' CHECK(stato IN ('ATTIVO', 'INATTIVO', 'IN_PRESTITO'))
     );
     """)
 
-    # ==========================================
-    # 4. CERTIFICATI MEDICI AGONISTICI
-    # ==========================================
+    # 4. Certificati Medici Agonistici
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS certificati_medici (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -84,69 +111,61 @@ def init_db():
     );
     """)
 
-    # ==========================================
-    # 5. RICEVUTE ISTITUZIONALI (Art. 4 DPR 633/72)
-    # ==========================================
+    # 5. Ricevute Istituzionali (Art. 4 DPR 633/72)
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS ricevute_istituzionali (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         numero_ricevuta TEXT NOT NULL,
         data_emissione TEXT NOT NULL,
         anagrafica_id INTEGER NOT NULL REFERENCES anagrafiche(id),
-        causale TEXT NOT NULL, -- Es: Quota iscrizione Campionato Calcio a 11 2026/2027
+        causale TEXT NOT NULL,
         importo REAL NOT NULL,
         modalita_pagamento TEXT CHECK(modalita_pagamento IN ('CONTANTI', 'BONIFICO', 'POS', 'PAYPAL')),
-        marca_da_bollo REAL DEFAULT 0.00, -- 2,00€ se importo > 77,47€
+        marca_da_bollo REAL DEFAULT 0.00,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
     """)
 
-    # ==========================================
-    # 6. FATTURE SPONSOR & PUBBLICITÀ (Regime 398/98)
-    # ==========================================
+    # 6. Fatture Sponsor & Pubblicità (Regime 398/98)
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS fatture_sponsor_398 (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         numero_fattura TEXT NOT NULL,
         data_fattura TEXT NOT NULL,
         sponsor_id INTEGER NOT NULL REFERENCES anagrafiche(id),
-        oggetto_contratto TEXT NOT NULL, -- Es: Sponsorizzazione maglie Prima Squadra / Cartellonistica campo
+        oggetto_contratto TEXT NOT NULL,
         imponibile REAL NOT NULL,
         aliquota_iva REAL DEFAULT 22.0,
         iva_totale REAL NOT NULL,
         totale_fattura REAL NOT NULL,
-        iva_da_versare_50 REAL NOT NULL, -- Calcolo automatico: 50% dell'IVA totale
-        stima_ires_3 REAL NOT NULL,      -- Calcolo automatico: 3% dell'imponibile
+        iva_da_versare_50 REAL NOT NULL,
+        stima_ires_3 REAL NOT NULL,
         note TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
     """)
 
-    # ==========================================
-    # 7. FATTURE PASSIVE E ACQUISTI
-    # ==========================================
+    # 7. Fatture Passive e Acquisti
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS fatture_passive (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         fornitore_id INTEGER NOT NULL REFERENCES anagrafiche(id),
         numero_doc TEXT NOT NULL,
         data_doc TEXT NOT NULL,
-        causale_spesa TEXT NOT NULL, -- Es: Affitto campo di gioco, Tasse gara FIGC, Materiale tecnico
+        causale_spesa TEXT NOT NULL,
         imponibile REAL NOT NULL,
         iva REAL DEFAULT 0.00,
         totale REAL NOT NULL,
-        categoria_spesa TEXT -- Es: STRUTTURA, MATERIALE_SPORTIVO, TESSERAMENTI_FIGC, SANITARIO
+        categoria_spesa TEXT
     );
     """)
 
-    # ==========================================
-    # 8. LAVORO SPORTIVO & COLLABORATORI (D.Lgs. 36/2021)
-    # ==========================================
+    # 8. Lavoro Sportivo & Collaboratori (D.Lgs. 36/2021)
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS collaboratori_sportivi (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         anagrafica_id INTEGER NOT NULL REFERENCES anagrafiche(id),
-        mansione TEXT NOT NULL, -- Es: Allenatore Prima Squadra, Preparatore Atletico, Massaggiatore
+        mansione TEXT NOT NULL,
         tipo_contratto TEXT CHECK(tipo_contratto IN ('VOLONTARIO_RIMBORSO', 'CO.CO.CO_SPORTIVO', 'PARTITA_IVA')),
         compenso_pattuito REAL DEFAULT 0.00
     );
@@ -159,8 +178,8 @@ def init_db():
         data_erogazione TEXT NOT NULL,
         causale TEXT NOT NULL,
         importo_lordo REAL NOT NULL,
-        progressivo_inps_anno REAL NOT NULL, -- Monitoraggio franchigia € 5.000,00
-        progressivo_irpef_anno REAL NOT NULL, -- Monitoraggio franchigia € 15.000,00
+        progressivo_inps_anno REAL NOT NULL,
+        progressivo_irpef_anno REAL NOT NULL,
         ritenuta_inps REAL DEFAULT 0.00,
         ritenuta_irpef REAL DEFAULT 0.00,
         importo_netto REAL NOT NULL
@@ -172,7 +191,7 @@ def init_db():
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         anagrafica_id INTEGER NOT NULL REFERENCES anagrafiche(id),
         data_partita TEXT NOT NULL,
-        incontro_calcio TEXT NOT NULL, -- Es: ASD Ameglia vs Spezia Calcio
+        incontro_calcio TEXT NOT NULL,
         luogo_trasferta TEXT NOT NULL,
         km_percorsi REAL DEFAULT 0.00,
         tariffa_aci REAL DEFAULT 0.00,
@@ -181,14 +200,12 @@ def init_db():
     );
     """)
 
-    # ==========================================
-    # 9. SCADENZARIO (INCASSI / PAGAMENTI)
-    # ==========================================
+    # 9. Scadenzario
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS scadenzario (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         tipo TEXT CHECK(tipo IN ('INCASSO_SPONSOR', 'INCASSO_QUOTA', 'PAGAMENTO_FORNITORE', 'PAGAMENTO_COLLABORATORE')),
-        riferimento_id INTEGER, -- ID fattura, ricevuta o compenso
+        riferimento_id INTEGER,
         data_scadenza TEXT NOT NULL,
         importo REAL NOT NULL,
         importo_pagato REAL DEFAULT 0.00,
@@ -196,9 +213,7 @@ def init_db():
     );
     """)
 
-    # ==========================================
-    # 10. PRIMA NOTA & PARTITA DOPPIA
-    # ==========================================
+    # 10. Prima Nota & Partita Doppia
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS movimenti_prima_nota (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -220,9 +235,7 @@ def init_db():
     );
     """)
 
-    # ==========================================
-    # 11. MOVIMENTI ESTRATTO CONTO (BANCA / PAYPAL)
-    # ==========================================
+    # 11. Movimenti Estratto Conto (Banca / PayPal)
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS estratti_conto_importati (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -236,14 +249,5 @@ def init_db():
     );
     """)
 
-    # Indici per velocizzare le ricerche delle scadenze e dei certificati
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_cert_scadenza ON certificati_medici(data_scadenza);")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_scad_stato ON scadenzario(stato);")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_tesserato_cat ON tesserati_calcio(categoria);")
-
     conn.commit()
     conn.close()
-
-if __name__ == "__main__":
-    init_db()
-    print("Database SQLite ASD Calcio 398/98 inizializzato con successo!")
