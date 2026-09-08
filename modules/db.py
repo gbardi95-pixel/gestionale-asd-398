@@ -5,13 +5,13 @@ import streamlit as st
 def get_connection():
     """
     Stabilisce la connessione al database:
-    1. Se sono presenti le chiavi Turso in st.secrets, usa Turso Cloud DB (libsql).
+    1. Se sono presenti le chiavi Turso in st.secrets (o var ambiente), usa Turso Cloud DB (libsql).
     2. Altrimenti ripiega sul database SQLite locale in data/contabilita_asd.db.
     """
     turso_url = None
     turso_token = None
 
-    # Lettura da st.secrets (Streamlit Cloud o .streamlit/secrets.toml)
+    # Lettura credenziali da Streamlit Secrets
     try:
         if hasattr(st, "secrets"):
             turso_url = st.secrets.get("TURSO_DATABASE_URL")
@@ -19,15 +19,15 @@ def get_connection():
     except Exception:
         pass
 
-    # Lettura da variabili d'ambiente (fallback)
+    # Fallback su Variabili d'Ambiente
     if not turso_url:
         turso_url = os.environ.get("TURSO_DATABASE_URL")
         turso_token = os.environ.get("TURSO_AUTH_TOKEN")
 
-    # Se le credenziali Turso esistono, connetti al Cloud
+    # Connessione a Turso Cloud se presenti le chiavi
     if turso_url and turso_token:
         try:
-            import libsql_experimental as libsql
+            import libsql
             conn = libsql.connect(database=turso_url, auth_token=turso_token)
             return conn
         except Exception as e:
@@ -46,7 +46,6 @@ def init_db():
     conn = get_connection()
     cursor = conn.cursor()
 
-    # Enable Foreign Keys
     try:
         cursor.execute("PRAGMA foreign_keys = ON;")
     except Exception:
