@@ -1,5 +1,5 @@
-streamlit>=1.30.0
-pandas>=2.0.0
-openpyxl>=3.1.0
-reportlab>=4.0.0
-libsql-experimental>=0.0.34
+streamlit
+pandas
+openpyxl
+reportlab
+libsql-experimental
