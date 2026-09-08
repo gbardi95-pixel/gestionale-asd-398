@@ -207,113 +207,153 @@ elif menu == "Calciatori & Certificati Medici":
 # 3. RICEVUTE ISTITUZIONALI (ART. 4 DPR 633/72)
 # ---------------------------------------------------------
 elif menu == "Ricevute Istituzionali (Art. 4)":
-  st.subheader(
-      "📜 Quota Iscrizione e Frequenza Calciatori (Decommercializzata)"
-  )
+  st.subheader("📜 Emissione Ricevute Istituzionali / Quote Associative")
 
-  df_calc = pd.read_sql_query(
-      "SELECT a.id, a.denominazione FROM tesserati_calcio t JOIN anagrafiche a"
-      " ON t.anagrafica_id = a.id",
+  # Possibilità di aggiungere un socio generico al volo
+  with st.expander("➕ Aggiungi Nuovo Socio / Persona Fisica in Anagrafica"):
+    with st.form("nuovo_socio_fast", clear_on_submit=True):
+      s_nome = st.text_input("Cognome e Nome / Ragione Sociale*")
+      s_cf = st.text_input("Codice Fiscale")
+      s_email = st.text_input("Email / Telefono")
+      if st.form_submit_button("Salva Socio"):
+        if s_nome:
+          cursor = conn.cursor()
+          cursor.execute(
+              "INSERT INTO anagrafiche (tipo, denominazione, codice_fiscale,"
+              " email) VALUES ('SOCIO_CALCIATORE', ?, ?, ?)",
+              (s_nome, s_cf, s_email),
+          )
+          conn.commit()
+          st.success(f"Socio '{s_nome}' aggiunto in anagrafica!")
+          st.rerun()
+
+  # Recupera tutte le anagrafiche di tipo SOCIO/CALCIATORE/ALTRO
+  df_soci = pd.read_sql_query(
+      "SELECT id, denominazione, codice_fiscale FROM anagrafiche WHERE tipo IN"
+      " ('SOCIO_CALCIATORE', 'ALTRO') ORDER BY denominazione",
       conn,
   )
 
-  if not df_calc.empty:
+  if not df_soci.empty:
+    st.markdown("### 📝 Nuova Ricevuta di Incasso")
     with st.form("nuova_ricevuta", clear_on_submit=True):
       col1, col2, col3 = st.columns(3)
       num_ric = col1.text_input("Numero Ricevuta", value="1/2026")
       data_ric = col2.date_input("Data Emissione")
 
-      calc_dict = dict(zip(df_calc["denominazione"], df_calc["id"]))
-      calc_sel = col3.selectbox(
-          "Calciatore / Tesserato", list(calc_dict.keys())
-      )
+      soci_dict = dict(zip(df_soci["denominazione"], df_soci["id"]))
+      socio_sel = col3.selectbox("Socio / Tesserato / Versante", list(soci_dict.keys()))
 
       c4, c5, c6 = st.columns(3)
-      causale = c4.text_input(
-          "Causale",
-          value=(
-              "Quota iscrizione e frequenza Campionato Calcio a 11 2026/2027"
-          ),
+      tipo_causale = c4.selectbox(
+          "Tipologia Quota",
+          [
+              "Quota Associativa Annua",
+              "Quota Iscrizione e Frequenza Campionato",
+              "Contributo Istituzionale Straordinario",
+          ],
       )
-      importo = c5.number_input(
-          "Importo Incassato (€)", min_value=0.0, step=25.0
+      causale_custom = c5.text_input("Dettaglio / Anno Sociale", value="Anno 2026")
+      importo = c6.number_input(
+          "Importo Incassato (€)", min_value=0.0, step=10.0
       )
-      pagamento = c6.selectbox(
+
+      pagamento = st.selectbox(
           "Modalità Pagamento", ["BONIFICO", "POS", "PAYPAL", "CONTANTI"]
       )
 
+      causale_completa = f"{tipo_causale} - {causale_custom}"
       bollo = 2.00 if importo > 77.47 else 0.00
+
       st.caption(
-          "Trattamento fiscale: **Fuori Campo IVA ex Art. 4 D.P.R. 633/72** |"
-          f" Marca da bollo virtuale/cartacea: **€ {bollo:.2f}**"
+          "Trattamento fiscale: **Decommercializzata / Fuori Campo IVA ex Art. 4"
+          f" D.P.R. 633/72** | Marca da bollo (se > € 77,47): **€ {bollo:.2f}**"
       )
 
       if st.form_submit_button("Emetti Ricevuta e Registra in Prima Nota"):
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-                    INSERT INTO ricevute_istituzionali (numero_ricevuta, data_emissione, anagrafica_id, causale, importo, modalita_pagamento, marca_da_bollo)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-            (
-                num_ric,
-                str(data_ric),
-                calc_dict[calc_sel],
-                causale,
-                importo,
-                pagamento,
-                bollo,
-            ),
-        )
+        if importo > 0:
+          cursor = conn.cursor()
+          # 1. Registrazione Ricevuta
+          cursor.execute(
+              """
+                        INSERT INTO ricevute_istituzionali (numero_ricevuta, data_emissione, anagrafica_id, causale, importo, modalita_pagamento, marca_da_bollo)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+              (
+                  num_ric,
+                  str(data_ric),
+                  soci_dict[socio_sel],
+                  causale_completa,
+                  importo,
+                  pagamento,
+                  bollo,
+              ),
+          )
 
-        cursor.execute(
-            """
-                    INSERT INTO movimenti_prima_nota (data_registrazione, numero_documento, causale, tipo_attivita)
-                    VALUES (?, ?, ?, 'ISTITUZIONALE')
-                """,
-            (str(data_ric), num_ric, f"Incasso quota da {calc_sel}"),
-        )
-        mov_id = cursor.lastrowid
+          # 2. Scrittura automatica in Prima Nota
+          cursor.execute(
+              """
+                        INSERT INTO movimenti_prima_nota (data_registrazione, numero_documento, causale, tipo_attivita)
+                        VALUES (?, ?, ?, 'ISTITUZIONALE')
+                    """,
+              (str(data_ric), num_ric, f"Incasso {tipo_causale} da {socio_sel}"),
+          )
+          mov_id = cursor.lastrowid
 
-        cod_cassa_banca = (
-            "10.01.001"
-            if pagamento == "BONIFICO"
-            else ("10.01.003" if pagamento == "PAYPAL" else "10.01.002")
-        )
-        cursor.execute(
-            "SELECT id FROM piano_dei_conti WHERE codice = ?", (cod_cassa_banca,)
-        )
-        acc_fin = cursor.fetchone()[0]
-        cursor.execute(
-            "SELECT id FROM piano_dei_conti WHERE codice = '50.01.002'"
-        )
-        acc_ric = cursor.fetchone()[0]
+          cod_cassa_banca = (
+              "10.01.001"
+              if pagamento == "BONIFICO"
+              else ("10.01.003" if pagamento == "PAYPAL" else "10.01.002")
+          )
+          cod_ricavo = (
+              "50.01.001"
+              if "Annua" in tipo_causale
+              else "50.01.002"
+          )
 
-        cursor.execute(
-            "INSERT INTO righe_prima_nota (movimento_id, sottoconto_id,"
-            " descrizione, dare, avere) VALUES (?, ?, 'Incasso Quota', ?,"
-            " 0.0)",
-            (mov_id, acc_fin, importo),
-        )
-        cursor.execute(
-            "INSERT INTO righe_prima_nota (movimento_id, sottoconto_id,"
-            " descrizione, dare, avere) VALUES (?, ?, 'Ricavo Quota"
-            " Istituzionale', 0.0, ?)",
-            (mov_id, acc_ric, importo),
-        )
+          cursor.execute(
+              "SELECT id FROM piano_dei_conti WHERE codice = ?", (cod_cassa_banca,)
+          )
+          acc_fin = cursor.fetchone()[0]
+          cursor.execute(
+              "SELECT id FROM piano_dei_conti WHERE codice = ?", (cod_ricavo,)
+          )
+          acc_ric = cursor.fetchone()[0]
 
-        conn.commit()
-        st.success(
-            f"Ricevuta N. {num_ric} emessa con successo e registrata in"
-            " contabilità!"
-        )
-        st.rerun()
+          # DARE: Cassa / Banca
+          cursor.execute(
+              "INSERT INTO righe_prima_nota (movimento_id, sottoconto_id,"
+              " descrizione, dare, avere) VALUES (?, ?, 'Incasso Quota', ?,"
+              " 0.0)",
+              (mov_id, acc_fin, importo),
+          )
+          # AVERE: Ricavo Istituzionale
+          cursor.execute(
+              "INSERT INTO righe_prima_nota (movimento_id, sottoconto_id,"
+              " descrizione, dare, avere) VALUES (?, ?, 'Ricavo Istituzionale',"
+              " 0.0, ?)",
+              (mov_id, acc_ric, importo),
+          )
+
+          conn.commit()
+          st.success(
+              f"Ricevuta N. {num_ric} emessa per {socio_sel} e contabilizzata!"
+          )
+          st.rerun()
+        else:
+          st.error("Inserisci un importo maggiore di zero.")
+  else:
+    st.info(
+        "Nessun socio presente in anagrafica. Aggiungi il primo socio dal"
+        " riquadro sopra per emettere le ricevute."
+    )
 
   st.divider()
+  st.markdown("### 📖 Registro Ricevute Istituzionali Emesse")
   df_ric = pd.read_sql_query(
       """
-        SELECT r.numero_ricevuta as 'N. Ricevuta', r.data_emissione as Data, a.denominazione as Calciatore, 
-               r.causale as Causale, r.importo as 'Importo (€)', r.modalita_pagamento as Pagamento
+        SELECT r.numero_ricevuta as 'N. Ricevuta', r.data_emissione as Data, a.denominazione as Socio, 
+               r.causale as Causale, r.importo as 'Importo (€)', r.modalita_pagamento as Pagamento, r.marca_da_bollo as 'Bollo (€)'
         FROM ricevute_istituzionali r
         JOIN anagrafiche a ON r.anagrafica_id = a.id
         ORDER BY r.id DESC
