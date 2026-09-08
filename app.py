@@ -3,13 +3,13 @@ import os
 import sqlite3
 import pandas as pd
 import streamlit as st
-from modules.db import get_connection, init_db
+from modules.db import PIANO_DEI_CONTI_ASD, get_connection, init_db
 from modules.reconciliation import parse_bank_csv, parse_paypal_csv
 
 # Inizializzazione Database
 init_db()
 
-# Recupero dinamico del titolo dai Secrets (con valore generico di fallback)
+# Titolo dinamico da Secrets
 try:
   APP_TITLE = st.secrets.get(
       "APP_TITLE", "Gestionale A.S.D. Calcio a 11 - Regime Legge 398/98"
@@ -19,18 +19,6 @@ except Exception:
 
 st.set_page_config(page_title=APP_TITLE, layout="wide", page_icon="⚽")
 st.title(f"⚽ {APP_TITLE}")
-
-# Intestazione Associazione (Dati Generici per Repository)
-ASD_INFO = {
-    "denominazione": "A.S.D. Calcio Dilettantistico",
-    "codice_fiscale": "90000000000",
-    "partita_iva": "00000000000",
-    "regime_fiscale": "Legge 398/1998",
-    "affiliazione": "FIGC / LND",
-    "indirizzo": "Via dello Stadio, 1",
-    "comune": "Ameglia",
-    "provincia": "SP",
-}
 
 # Menu Navigazione
 st.sidebar.header("Area Gestionale")
@@ -61,7 +49,6 @@ if menu == "Dashboard & Alert Scadenze":
       "%Y-%m-%d"
   )
 
-  # Query Certificati Scaduti o In Scadenza
   df_cert_alert = pd.read_sql_query(
       f"""
         SELECT a.denominazione as 'Calciatore', c.tipo, c.data_scadenza as 'Scadenza', c.stato_idoneita
@@ -73,7 +60,6 @@ if menu == "Dashboard & Alert Scadenze":
       conn,
   )
 
-  # KPI Generali
   num_tesserati = pd.read_sql_query(
       "SELECT COUNT(*) as tot FROM tesserati_calcio WHERE stato='ATTIVO'", conn
   )["tot"].iloc[0]
@@ -99,7 +85,6 @@ if menu == "Dashboard & Alert Scadenze":
 
   st.divider()
 
-  # Sezione criticità Certificati Medici per le Partite di Campionato
   st.markdown("### 🚑 Alert Certificati Medici Agonistici Calcio a 11")
   if not df_cert_alert.empty:
     for _, r in df_cert_alert.iterrows():
@@ -707,6 +692,19 @@ elif menu == "Prima Nota & Rendiconto ASD":
 # ---------------------------------------------------------
 elif menu == "Piano dei Conti ASD":
   st.subheader("🌳 Struttura del Piano dei Conti ASD (Legge 398/98)")
+
+  if st.button("🔄 Ripopola Piano dei Conti Predefinito"):
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM piano_dei_conti;")
+    cursor.executemany(
+        "INSERT INTO piano_dei_conti (codice, nome, tipo, livello) VALUES (?,"
+        " ?, ?, ?);",
+        PIANO_DEI_CONTI_ASD,
+    )
+    conn.commit()
+    st.success("Piano dei Conti ripopolato con successo!")
+    st.rerun()
+
   df_pdc = pd.read_sql_query(
       "SELECT codice, nome, tipo, livello FROM piano_dei_conti ORDER BY"
       " codice",
