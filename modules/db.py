@@ -2,16 +2,60 @@ import os
 import sqlite3
 import streamlit as st
 
+# Piano dei Conti predefinito per ASD Calcio a 11 (Legge 398/98)
+PIANO_DEI_CONTI_ASD = [
+    # 10. ATTIVITÀ
+    ('10', 'ATTIVITÀ CIRCOLANTI E CASSA', 'ATTIVITA', 1),
+    ('10.01', 'Cassa e Banche', 'ATTIVITA', 2),
+    ('10.01.001', 'Banca c/c Principale', 'ATTIVITA', 3),
+    ('10.01.002', 'Cassa Contanti', 'ATTIVITA', 3),
+    ('10.01.003', 'Conto PayPal ASD', 'ATTIVITA', 3),
+    ('10.02', 'Crediti Commerciali e Istituzionali', 'ATTIVITA', 2),
+    ('10.02.001', 'Crediti v/Soci e Calciatori', 'ATTIVITA', 3),
+    ('10.02.002', 'Crediti v/Sponsor e Pubblicità', 'ATTIVITA', 3),
+
+    # 20. PASSIVITÀ
+    ('20', 'PASSIVITÀ E DEBITI', 'PASSIVITA', 1),
+    ('20.01', 'Debiti Commerciali e Tributari', 'PASSIVITA', 2),
+    ('20.01.001', 'Debiti v/Fornitori', 'PASSIVITA', 3),
+    ('20.02', 'Debiti Tributari e Sportivi', 'PASSIVITA', 2),
+    ('20.02.001', 'Erario c/IVA 398/98 da Versare', 'PASSIVITA', 3),
+    ('20.02.002', 'Debiti v/Collaboratori e Istruttori', 'PASSIVITA', 3),
+
+    # 30. PATRIMONIO NETTO
+    ('30', 'PATRIMONIO NETTO ASD', 'NETTO', 1),
+    ('30.01', 'Fondo Dotazione e Riserve', 'NETTO', 2),
+    ('30.01.001', 'Fondo di Dotazione Iniziale', 'NETTO', 3),
+    ('30.01.002', 'Avanzo/Disavanzo di Gestione Esercizio', 'NETTO', 3),
+
+    # 40. COSTI
+    ('40', 'COSTI PER ATTIVITÀ SPORTIVA E GESTIONE', 'COSTO', 1),
+    ('40.01', 'Costi Attività Sportiva Calcio', 'COSTO', 2),
+    ('40.01.001', 'Compensi e Rimborsi Staff Tecnico', 'COSTO', 3),
+    ('40.01.002', 'Tasse Affiliazione e Tesseramenti FIGC/LND', 'COSTO', 3),
+    ('40.01.003', 'Materiale Sportivo e Abbigliamento Gara', 'COSTO', 3),
+    ('40.01.004', 'Affitto Campi e Strutture Sportive', 'COSTO', 3),
+    ('40.01.005', 'Spese Sanitarie e Visite Mediche', 'COSTO', 3),
+    ('40.02', 'Costi Generali e Amministrativi', 'COSTO', 2),
+    ('40.02.001', 'Consulenze Amministrative e Fiscali', 'COSTO', 3),
+    ('40.02.002', 'Utenze e Manutenzioni Impianti', 'COSTO', 3),
+
+    # 50. RICAVI
+    ('50', 'RICAVI ED ENTRATE ASD', 'RICAVO', 1),
+    ('50.01', 'Entrate Istituzionali (Art. 4 DPR 633/72)', 'RICAVO', 2),
+    ('50.01.001', 'Quote Associative Annue', 'RICAVO', 3),
+    ('50.01.002', 'Quote Iscrizione e Frequenza Calciatori', 'RICAVO', 3),
+    ('50.02', 'Entrate Commerciali (Regime 398/98)', 'RICAVO', 2),
+    ('50.02.001', 'Ricavi per Sponsorizzazioni e Pubblicità', 'RICAVO', 3),
+    ('50.02.002', 'Contributi da Enti e Associazioni', 'RICAVO', 3),
+]
+
+
 def get_connection():
-    """
-    Stabilisce la connessione al database:
-    1. Se sono presenti le chiavi Turso in st.secrets (o var ambiente), usa Turso Cloud DB (libsql).
-    2. Altrimenti ripiega sul database SQLite locale in data/contabilita_asd.db.
-    """
+    """Stabilisce la connessione al database Turso Cloud DB (o SQLite locale)."""
     turso_url = None
     turso_token = None
 
-    # Lettura credenziali da Streamlit Secrets
     try:
         if hasattr(st, "secrets"):
             turso_url = st.secrets.get("TURSO_DATABASE_URL")
@@ -19,12 +63,10 @@ def get_connection():
     except Exception:
         pass
 
-    # Fallback su Variabili d'Ambiente
     if not turso_url:
         turso_url = os.environ.get("TURSO_DATABASE_URL")
         turso_token = os.environ.get("TURSO_AUTH_TOKEN")
 
-    # Connessione a Turso Cloud se presenti le chiavi
     if turso_url and turso_token:
         try:
             import libsql
@@ -33,7 +75,6 @@ def get_connection():
         except Exception as e:
             st.error(f"Errore di connessione a Turso Cloud DB: {e}")
 
-    # Fallback su SQLite Locale
     os.makedirs("data", exist_ok=True)
     db_path = os.path.join("data", "contabilita_asd.db")
     conn = sqlite3.connect(db_path, check_same_thread=False)
@@ -42,7 +83,7 @@ def get_connection():
 
 
 def init_db():
-    """Inizializza tutte le tabelle del database per l'ASD Calcio a 11 in Regime 398/98."""
+    """Inizializza le tabelle e popola automaticamente il Piano dei Conti se vuoto."""
     conn = get_connection()
     cursor = conn.cursor()
 
@@ -234,7 +275,7 @@ def init_db():
     );
     """)
 
-    # 11. Movimenti Estratto Conto (Banca / PayPal)
+    # 11. Movimenti Estratto Conto
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS estratti_conto_importati (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -247,6 +288,14 @@ def init_db():
         stato_riconciliazione TEXT DEFAULT 'DA_RICONCILIARE' CHECK(stato_riconciliazione IN ('DA_RICONCILIARE', 'RICONCILIATO'))
     );
     """)
+
+    # AUTO-POPOLAMENTO AUTOMATICO PIANO DEI CONTI
+    cursor.execute("SELECT COUNT(*) FROM piano_dei_conti;")
+    if cursor.fetchone()[0] == 0:
+        cursor.executemany(
+            "INSERT INTO piano_dei_conti (codice, nome, tipo, livello) VALUES (?, ?, ?, ?);",
+            PIANO_DEI_CONTI_ASD
+        )
 
     conn.commit()
     conn.close()
