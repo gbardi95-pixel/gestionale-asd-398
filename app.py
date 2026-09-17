@@ -5,7 +5,6 @@ import sqlite3
 import pandas as pd
 import streamlit as st
 from modules.db import PIANO_DEI_CONTI_ASD, get_connection, init_db
-from modules.reconciliation import parse_bank_csv, parse_paypal_csv
 
 # Inizializzazione Database
 init_db()
@@ -38,6 +37,208 @@ menu = st.sidebar.radio(
 )
 
 conn = get_connection()
+
+
+# ---------------------------------------------------------
+# FUNZIONE PARSER ESTRATTO CONTO ROBUSTO (CSV / EXCEL)
+# ---------------------------------------------------------
+def parse_bank_statement(file_bytes, file_name, tipo_fonte="BANCA"):
+  """Parser universale e flessibile per estratti conto bancari e PayPal (CSV e Excel).
+
+  Gestisce separatori differenti (;, ,, \t), codifiche varie, e colonne
+  Accrediti/Addebiti.
+  """
+  df = None
+  is_excel = file_name.lower().endswith((".xlsx", ".xls"))
+
+  if is_excel:
+    try:
+      excel_file = pd.ExcelFile(io.BytesIO(file_bytes))
+      for sheet in excel_file.sheet_names:
+        df_raw = pd.read_excel(excel_file, sheet_name=sheet, header=None)
+        if not df_raw.empty:
+          df = df_raw
+          break
+    except Exception as e:
+      return (
+          pd.DataFrame(),
+          f"Errore durante la lettura del file Excel: {e}",
+      )
+  else:
+    encodings = ["utf-8", "latin-1", "iso-8859-1", "cp1252"]
+    delimiters = [";", ",", "\t", "|"]
+
+    for enc in encodings:
+      for delim in delimiters:
+        try:
+          text = file_bytes.decode(enc)
+          df_raw = pd.read_csv(
+              io.StringIO(text), sep=delim, header=None, dtype=str
+          )
+          if df_raw.shape[1] >= 2 and len(df_raw) >= 1:
+            df = df_raw
+            break
+        except Exception:
+          continue
+      if df is not None:
+        break
+
+  if df is None or df.empty:
+    return (
+        pd.DataFrame(),
+        "Impossibile leggere il file. Verifica che non sia vuoto o corrotto.",
+    )
+
+  # Cerca la riga di intestazione (header)
+  header_idx = None
+  keywords = [
+      "data",
+      "date",
+      "descrizione",
+      "causale",
+      "importo",
+      "accredito",
+      "addebito",
+      "entrate",
+      "uscite",
+      "dare",
+      "avere",
+      "amount",
+      "operazione",
+  ]
+
+  for idx, row in df.iterrows():
+    row_str = " ".join([str(val).lower() for val in row.values if pd.notna(val)])
+    matches = sum(1 for kw in keywords if kw in row_str)
+    if matches >= 1:
+      header_idx = idx
+      break
+
+  if header_idx is not None:
+    headers = [str(val).strip() for val in df.iloc[header_idx].values]
+    df_data = df.iloc[header_idx + 1 :].copy()
+    df_data.columns = headers
+  else:
+    df_data = df.copy()
+    df_data.columns = [f"Colonna_{i+1}" for i in range(df_data.shape[1])]
+
+  df_data = df_data.dropna(how="all")
+
+  col_data = None
+  col_desc = None
+  col_importo = None
+  col_entrate = None
+  col_uscite = None
+  col_comm = None
+
+  for col in df_data.columns:
+    col_lower = str(col).lower()
+    if not col_data and any(k in col_lower for k in ["data", "date"]):
+      col_data = col
+    elif not col_desc and any(
+        k in col_lower
+        for k in [
+            "descrizione",
+            "causale",
+            "dettaglio",
+            "oggetto",
+            "causale/descrizione",
+            "note",
+        ]
+    ):
+      col_desc = col
+    elif not col_comm and any(
+        k in col_lower for k in ["commissione", "tariffa", "fee"]
+    ):
+      col_comm = col
+    elif not col_importo and any(
+        k in col_lower for k in ["importo", "ammontare", "totale", "amount"]
+    ):
+      col_importo = col
+    elif not col_entrate and any(
+        k in col_lower for k in ["accredito", "entrate", "avere", "in", "credit"]
+    ):
+      col_entrate = col
+    elif not col_uscite and any(
+        k in col_lower for k in ["addebito", "uscite", "dare", "out", "debit"]
+    ):
+      col_uscite = col
+
+  remaining_cols = list(df_data.columns)
+  if not col_data and len(remaining_cols) > 0:
+    col_data = remaining_cols[0]
+  if not col_desc and len(remaining_cols) > 1:
+    col_desc = remaining_cols[1]
+  if not col_importo and not (col_entrate or col_uscite) and len(remaining_cols) > 2:
+    col_importo = remaining_cols[2]
+
+  records = []
+
+  def clean_num(val):
+    if pd.isna(val) or val is None:
+      return 0.0
+    s = str(val).strip().replace("€", "").replace(" ", "")
+    if not s:
+      return 0.0
+    if "." in s and "," in s:
+      s = s.replace(".", "").replace(",", ".")
+    elif "," in s:
+      s = s.replace(",", ".")
+    try:
+      return float(s)
+    except ValueError:
+      return 0.0
+
+  def clean_date(val):
+    if pd.isna(val) or not val:
+      return datetime.date.today().strftime("%Y-%m-%d")
+    s = str(val).strip()
+    try:
+      parsed = pd.to_datetime(s, dayfirst=True, errors="coerce")
+      if pd.notna(parsed):
+        return parsed.strftime("%Y-%m-%d")
+    except Exception:
+      pass
+    return str(s)[:10]
+
+  for _, row in df_data.iterrows():
+    dt_val = clean_date(row.get(col_data, ""))
+    desc_val = (
+        str(row.get(col_desc, "")).strip()
+        if col_desc
+        else "Movimento Bancario"
+    )
+    if not desc_val or desc_val.lower() == "nan":
+      desc_val = "Movimento Generico"
+
+    comm_val = abs(clean_num(row.get(col_comm, 0.0))) if col_comm else 0.0
+
+    if col_importo:
+      imp_val = clean_num(row.get(col_importo, 0.0))
+    elif col_entrate or col_uscite:
+      ent = clean_num(row.get(col_entrate, 0.0)) if col_entrate else 0.0
+      usc = clean_num(row.get(col_uscite, 0.0)) if col_uscite else 0.0
+      imp_val = ent - abs(usc)
+    else:
+      imp_val = 0.0
+
+    if imp_val == 0.0 and desc_val == "Movimento Generico":
+      continue
+
+    netto_val = imp_val - comm_val
+
+    records.append({
+        "data_transazione": dt_val,
+        "descrizione": desc_val,
+        "importo_lordo": round(imp_val, 2),
+        "commissione": round(comm_val, 2),
+        "importo_netto": round(netto_val, 2),
+        "stato_riconciliazione": "DA_RICONCILIARE",
+    })
+
+  result_df = pd.DataFrame(records)
+  return result_df, None
+
 
 # ---------------------------------------------------------
 # 1. DASHBOARD & ALERT SCADENZE
@@ -112,7 +313,6 @@ if menu == "Dashboard & Alert Scadenze":
 elif menu == "Calciatori & Certificati Medici":
   st.subheader("🏃 Anagrafica Calciatori Calcio a 11 e Idoneità Medica")
 
-  # Expander 1: Inserimento Singolo
   with st.expander("➕ Inserisci Singolo Calciatore / Tesserato"):
     with st.form("nuovo_calciatore", clear_on_submit=True):
       c1, c2, c3 = st.columns(3)
@@ -191,9 +391,7 @@ elif menu == "Calciatori & Certificati Medici":
           st.success(f"Calciatore {nome} registrato con successo!")
           st.rerun()
 
-  # Expander 2: Importazione Massiva con Download Modello
   with st.expander("📥 Importazione Una Tantum Calciatori da File Excel (.xlsx)"):
-    # Generazione dinamica del file modello in memoria
     buffer = io.BytesIO()
     df_template_demo = pd.DataFrame([{
         "Cognome_Nome": "Rossi Mario",
@@ -280,7 +478,6 @@ elif menu == "Calciatori & Certificati Medici":
             )
 
             if nome and nome.lower() != "nan":
-              # 1. Anagrafica Generale
               cursor.execute(
                   "INSERT INTO anagrafiche (tipo, denominazione,"
                   " codice_fiscale) VALUES ('SOCIO_CALCIATORE', ?, ?)",
@@ -288,7 +485,6 @@ elif menu == "Calciatori & Certificati Medici":
               )
               anag_id = cursor.lastrowid
 
-              # 2. Tesserato Calcio
               cursor.execute(
                   """
                             INSERT INTO tesserati_calcio (anagrafica_id, matricola_figc, categoria, ruolo, data_tesseramento, quota_stagionale)
@@ -297,7 +493,6 @@ elif menu == "Calciatori & Certificati Medici":
                   (anag_id, matricola, categoria, ruolo, quota_stag),
               )
 
-              # 3. Certificato Medico Agonistico
               if scad_medica and scad_medica.lower() != "nan":
                 rilascio = (
                     data_ril
@@ -437,12 +632,11 @@ elif menu == "Ricevute Istituzionali (Art. 4)":
               if pagamento == "BONIFICO"
               else ("10.01.003" if pagamento == "PAYPAL" else "10.01.002")
           )
-          cod_ricavo = (
-              "50.01.001" if "Annua" in tipo_causale else "50.01.002"
-          )
+          cod_ricavo = "50.01.001" if "Annua" in tipo_causale else "50.01.002"
 
           cursor.execute(
-              "SELECT id FROM piano_dei_conti WHERE codice = ?", (cod_cassa_banca,)
+              "SELECT id FROM piano_dei_conti WHERE codice = ?",
+              (cod_cassa_banca,),
           )
           acc_fin = cursor.fetchone()[0]
           cursor.execute(
@@ -781,32 +975,207 @@ elif menu == "Lavoro Sportivo & Rimborsi (D.Lgs. 36)":
         st.rerun()
 
 # ---------------------------------------------------------
-# 6. RICONCILIAZIONE ESTRATTI CONTO
+# 6. RICONCILIAZIONE ESTRATTI CONTO (AGGIORNATO E CORRETTO)
 # ---------------------------------------------------------
 elif menu == "Riconciliazione Estratti Conto":
   st.subheader("🏦 Riconciliazione Movimenti Bancari e PayPal")
 
-  c_f1, c_f2 = st.columns(2)
-  tipo_fonte = c_f1.selectbox(
-      "Seleziona Conto di Origine",
-      ["Conto Corrente Bancario", "Conto PayPal"],
-  )
-  uploaded_file = c_f2.file_uploader(
-      "Carica File Estratto Conto (.csv / .xlsx)", type=["csv", "xlsx", "xls"]
-  )
+  tab_upload, tab_saved, tab_manual = st.tabs([
+      "📥 Importa Estratto Conto (CSV / Excel)",
+      "📋 Movimenti Salvati & Riconciliazione DB",
+      "➕ Inserimento Manuale Movimento",
+  ])
 
-  if uploaded_file is not None:
-    file_bytes = uploaded_file.read()
-    if "PayPal" in tipo_fonte:
-      df_movimenti = parse_paypal_csv(file_bytes)
-    else:
-      df_movimenti = parse_bank_csv(file_bytes, uploaded_file.name)
+  with tab_upload:
+    c_f1, c_f2 = st.columns(2)
+    tipo_fonte = c_f1.selectbox(
+        "Seleziona Conto di Origine",
+        ["Conto Corrente Bancario", "Conto PayPal"],
+    )
+    uploaded_file = c_f2.file_uploader(
+        "Carica File Estratto Conto (.csv / .xlsx / .xls)",
+        type=["csv", "xlsx", "xls"],
+    )
 
-    if not df_movimenti.empty:
-      st.success(f"Trovati {len(df_movimenti)} movimenti da elaborare.")
-      st.dataframe(df_movimenti, use_container_width=True)
+    if uploaded_file is not None:
+      file_bytes = uploaded_file.read()
+      df_parsed, err = parse_bank_statement(
+          file_bytes, uploaded_file.name, tipo_fonte
+      )
+
+      if err:
+        st.error(f"⚠️ {err}")
+      elif not df_parsed.empty:
+        st.success(
+            f"✅ Rilevati **{len(df_parsed)}** movimenti dal file"
+            f" `{uploaded_file.name}`."
+        )
+        st.info(
+            "💡 **Puoi modificare o correggere i dati direttamente nella"
+            " tabella sottostante** prima di cliccare su *Salva nel Database*."
+        )
+
+        # Editor di testo interattivo per la modifica immediata
+        edited_df = st.data_editor(
+            df_parsed,
+            num_rows="dynamic",
+            use_container_width=True,
+            column_config={
+                "data_transazione": st.column_config.TextColumn(
+                    "Data (YYYY-MM-DD)"
+                ),
+                "descrizione": st.column_config.TextColumn("Descrizione / Causale"),
+                "importo_lordo": st.column_config.NumberColumn(
+                    "Importo Lordo (€)", format="%.2f €"
+                ),
+                "commissione": st.column_config.NumberColumn(
+                    "Commissione (€)", format="%.2f €"
+                ),
+                "importo_netto": st.column_config.NumberColumn(
+                    "Importo Netto (€)", format="%.2f €"
+                ),
+                "stato_riconciliazione": st.column_config.SelectboxColumn(
+                    "Stato", options=["DA_RICONCILIARE", "RICONCILIATO"]
+                ),
+            },
+        )
+
+        col_save, col_clear = st.columns([2, 1])
+        if col_save.button("💾 Salva e Importa Movimenti nel Database"):
+          cursor = conn.cursor()
+          saved_count = 0
+          fonte_str = "PAYPAL" if "PayPal" in tipo_fonte else "BANCA"
+
+          for _, row in edited_df.iterrows():
+            d_trans = str(row["data_transazione"]).strip()
+            desc_t = str(row["descrizione"]).strip()
+            imp_l = float(row["importo_lordo"])
+            comm_t = float(row.get("commissione", 0.0))
+            imp_n = float(row["importo_netto"])
+            st_ric = str(row.get("stato_riconciliazione", "DA_RICONCILIARE"))
+
+            cursor.execute(
+                """
+                            INSERT INTO estratti_conto_importati (fonte, data_transazione, descrizione, importo_lordo, commissione, importo_netto, stato_riconciliazione)
+                            VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                (fonte_str, d_trans, desc_t, imp_l, comm_t, imp_n, st_ric),
+            )
+            saved_count += 1
+
+          conn.commit()
+          st.success(
+              f"🎉 Salvati con successo **{saved_count}** movimenti bancari nel"
+              " database!"
+          )
+          st.rerun()
+      else:
+        st.warning(
+            "Nessun movimento trovato nel file. Verifica la formattazione."
+        )
+
+  with tab_saved:
+    st.markdown("### 📖 Movimenti Salvi in Archivio")
+
+    filtro_stato = st.selectbox(
+        "Filtra per Stato Riconciliazione",
+        ["TUTTI", "DA_RICONCILIARE", "RICONCILIATO"],
+    )
+
+    query_str = "SELECT id, fonte as Fonte, data_transazione as Data, descrizione as Descrizione, importo_lordo as 'Lordo (€)', commissione as 'Commissione (€)', importo_netto as 'Netto (€)', stato_riconciliazione as Stato FROM estratti_conto_importati"
+    if filtro_stato != "TUTTI":
+      query_str += f" WHERE stato_riconciliazione = '{filtro_stato}'"
+    query_str += " ORDER BY id DESC"
+
+    df_db_saved = pd.read_sql_query(query_str, conn)
+
+    if not df_db_saved.empty:
+      st.dataframe(df_db_saved, use_container_width=True)
+
+      st.divider()
+      st.markdown("### ⚡ Operazioni di Riconciliazione o Elimina")
+
+      c_m1, c_m2, c_m3 = st.columns([2, 2, 1])
+      mov_dict = {
+          f"ID {row['id']} | {row['Data']} | {row['Descrizione']} (€"
+          f" {row['Netto (€)']:.2f})": row["id"]
+          for _, row in df_db_saved.iterrows()
+      }
+      mov_sel = c_m1.selectbox("Seleziona Movimento", list(mov_dict.keys()))
+
+      nuovo_stato = c_m2.selectbox(
+          "Imposta Stato", ["RICONCILIATO", "DA_RICONCILIARE"]
+      )
+
+      if c_m3.button("Aggiorna Stato"):
+        mov_id_sel = mov_dict[mov_sel]
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE estratti_conto_importati SET stato_riconciliazione = ?"
+            " WHERE id = ?",
+            (nuovo_stato, mov_id_sel),
+        )
+        conn.commit()
+        st.success(f"Movimento ID {mov_id_sel} aggiornato a '{nuovo_stato}'!")
+        st.rerun()
+
+      with st.expander("🗑️ Elimina Movimento Selezionato"):
+        if st.button("Conferma Eliminazione Record"):
+          mov_id_sel = mov_dict[mov_sel]
+          cursor = conn.cursor()
+          cursor.execute(
+              "DELETE FROM estratti_conto_importati WHERE id = ?",
+              (mov_id_sel,),
+          )
+          conn.commit()
+          st.success("Movimento eliminato dal database!")
+          st.rerun()
     else:
-      st.error("Formato file non valido o nessun movimento trovato.")
+        st.info("Nessun movimento bancario salvato nel database.")
+
+  with tab_manual:
+    st.markdown("### ➕ Inserimento Manuale Singolo Movimento Bancario")
+    with st.form("form_manual_bank_entry", clear_on_submit=True):
+      m_col1, m_col2, m_col3 = st.columns(3)
+      m_fonte = m_col1.selectbox("Conto Fonte", ["BANCA", "PAYPAL"])
+      m_data = m_col2.date_input("Data Transazione")
+      m_desc = m_col3.text_input(
+          "Descrizione / Causale Movimento", value="Bonifico incasso quota"
+      )
+
+      m_col4, m_col5 = st.columns(2)
+      m_lordo = m_col4.number_input(
+          "Importo Lordo (€) (usa valori negativi per le uscite)",
+          value=0.0,
+          step=10.0,
+      )
+      m_comm = m_col5.number_input(
+          "Commissione (€)", min_value=0.0, value=0.0, step=1.0
+      )
+
+      if st.form_submit_button("Salva Movimento nel Database"):
+        if m_desc and m_lordo != 0.0:
+          m_netto = m_lordo - m_comm
+          cursor = conn.cursor()
+          cursor.execute(
+              """
+                        INSERT INTO estratti_conto_importati (fonte, data_transazione, descrizione, importo_lordo, commissione, importo_netto, stato_riconciliazione)
+                        VALUES (?, ?, ?, ?, ?, ?, 'DA_RICONCILIARE')
+                    """,
+              (
+                  m_fonte,
+                  str(m_data),
+                  m_desc,
+                  m_lordo,
+                  m_comm,
+                  m_netto,
+              ),
+          )
+          conn.commit()
+          st.success("Movimento salvato con successo nel database!")
+          st.rerun()
+        else:
+          st.error("Inserisci una descrizione ed un importo valido.")
 
 # ---------------------------------------------------------
 # 7. PRIMA NOTA & RENDICONTO ASD
@@ -817,10 +1186,96 @@ elif menu == "Prima Nota & Rendiconto ASD":
   )
 
   tab_giornale, tab_rendiconto = st.tabs(
-      ["Giornale di Prima Nota (Partita Doppia)", "Rendiconto Economico Finanziario"]
+      [
+          "Giornale di Prima Nota (Partita Doppia)",
+          "Rendiconto Economico Finanziario",
+      ]
   )
 
   with tab_giornale:
+    with st.expander(
+        "➕ Nuova Registrazione Manuale (Uscite / Spese / Incassi Generici)"
+    ):
+      with st.form("nuova_prima_nota_manuale", clear_on_submit=True):
+        col1, col2, col3 = st.columns(3)
+        data_reg = col1.date_input("Data Registrazione")
+        num_doc = col2.text_input(
+            "N. Documento / Riferimento", value="Scontrino / Bonifico"
+        )
+        causale = col3.text_input(
+            "Causale Operazione",
+            value="Pagamento affitto campo / Acquisto materiale",
+        )
+
+        tipo_att = st.selectbox(
+            "Ambito Attività", ["ISTITUZIONALE", "COMMERCIALE_398"]
+        )
+
+        df_pdc = pd.read_sql_query(
+            "SELECT id, codice || ' - ' || nome as conto FROM piano_dei_conti"
+            " WHERE livello = 3 ORDER BY codice",
+            conn,
+        )
+        pdc_dict = dict(zip(df_pdc["conto"], df_pdc["id"]))
+
+        col_d, col_a = st.columns(2)
+        conto_dare = col_d.selectbox(
+            "Conto DARE (Costo da addebitare o Cassa/Banca che riceve)",
+            list(pdc_dict.keys()),
+            key="dare_acc",
+        )
+        importo_dare = col_d.number_input(
+            "Importo DARE (€)", min_value=0.0, step=10.0, key="dare_val"
+        )
+
+        conto_avere = col_a.selectbox(
+            "Conto AVERE (Cassa/Banca da cui si paga o Ricavo)",
+            list(pdc_dict.keys()),
+            key="avere_acc",
+        )
+        importo_avere = col_a.number_input(
+            "Importo AVERE (€)", min_value=0.0, step=10.0, key="avere_val"
+        )
+
+        if st.form_submit_button("Salva Scrittura in Prima Nota"):
+          if importo_dare > 0 and importo_dare == importo_avere:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                        INSERT INTO movimenti_prima_nota (data_registrazione, numero_documento, causale, tipo_attivita)
+                        VALUES (?, ?, ?, ?)
+                    """,
+                (str(data_reg), num_doc, causale, tipo_att),
+            )
+            mov_id = cursor.lastrowid
+
+            cursor.execute(
+                """
+                        INSERT INTO righe_prima_nota (movimento_id, sottoconto_id, descrizione, dare, avere)
+                        VALUES (?, ?, ?, ?, 0.00)
+                    """,
+                (mov_id, pdc_dict[conto_dare], causale, importo_dare),
+            )
+
+            cursor.execute(
+                """
+                        INSERT INTO righe_prima_nota (movimento_id, sottoconto_id, descrizione, dare, avere)
+                        VALUES (?, ?, ?, 0.00, ?)
+                    """,
+                (mov_id, pdc_dict[conto_avere], causale, importo_avere),
+            )
+
+            conn.commit()
+            st.success("Scrittura registrata con successo!")
+            st.rerun()
+          else:
+            st.error(
+                "Gli importi DARE e AVERE devono corrispondere ed essere"
+                " maggiori di zero."
+            )
+
+    st.divider()
+
     df_pn = pd.read_sql_query(
         """
             SELECT m.data_registrazione as Data, m.numero_documento as Doc, m.causale as Causale, 
