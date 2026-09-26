@@ -9,7 +9,7 @@ from modules.db import PIANO_DEI_CONTI_ASD, get_connection, init_db
 # Inizializzazione Database
 init_db()
 
-# Titolo dinamico da Secrets (con valore generico di fallback)
+# Titolo dinamico da Secrets
 try:
   APP_TITLE = st.secrets.get(
       "APP_TITLE", "Gestionale A.S.D. Calcio a 11 - Regime Legge 398/98"
@@ -26,7 +26,7 @@ menu = st.sidebar.radio(
     "Seleziona Modulo:",
     [
         "Dashboard & Alert Scadenze",
-        "Calciatori & Certificati Medici",
+        "Soci, Atleti & Dirigenza",
         "Ricevute Istituzionali (Art. 4)",
         "Sponsor & Pubblicità (398/98)",
         "Lavoro Sportivo & Rimborsi (D.Lgs. 36)",
@@ -43,11 +43,6 @@ conn = get_connection()
 # FUNZIONE PARSER ESTRATTO CONTO ROBUSTO (CSV / EXCEL)
 # ---------------------------------------------------------
 def parse_bank_statement(file_bytes, file_name, tipo_fonte="BANCA"):
-  """Parser universale e flessibile per estratti conto bancari e PayPal (CSV e Excel).
-
-  Gestisce separatori differenti (;, ,, \t), codifiche varie, e colonne
-  Accrediti/Addebiti.
-  """
   df = None
   is_excel = file_name.lower().endswith((".xlsx", ".xls"))
 
@@ -89,7 +84,6 @@ def parse_bank_statement(file_bytes, file_name, tipo_fonte="BANCA"):
         "Impossibile leggere il file. Verifica che non sia vuoto o corrotto.",
     )
 
-  # Cerca la riga di intestazione (header)
   header_idx = None
   keywords = [
       "data",
@@ -124,12 +118,14 @@ def parse_bank_statement(file_bytes, file_name, tipo_fonte="BANCA"):
 
   df_data = df_data.dropna(how="all")
 
-  col_data = None
-  col_desc = None
-  col_importo = None
-  col_entrate = None
-  col_uscite = None
-  col_comm = None
+  col_data, col_desc, col_importo, col_entrate, col_uscite, col_comm = (
+      None,
+      None,
+      None,
+      None,
+      None,
+      None,
+  )
 
   for col in df_data.columns:
     col_lower = str(col).lower()
@@ -236,8 +232,7 @@ def parse_bank_statement(file_bytes, file_name, tipo_fonte="BANCA"):
         "stato_riconciliazione": "DA_RICONCILIARE",
     })
 
-  result_df = pd.DataFrame(records)
-  return result_df, None
+  return pd.DataFrame(records), None
 
 
 # ---------------------------------------------------------
@@ -280,14 +275,14 @@ if menu == "Dashboard & Alert Scadenze":
   )["tot"].iloc[0]
 
   k1, k2, k3, k4 = st.columns(4)
-  k1.metric("Calciatori Attivi", num_tesserati)
+  k1.metric("Totale Anagrafiche Attive", num_tesserati)
   k2.metric("Quote Incassate (Istituzionale)", f"€ {tot_quote:,.2f}")
   k3.metric("Ricavi Sponsor (398/98)", f"€ {tot_sponsor:,.2f}")
   k4.metric("IVA 398/98 da Versare (50%)", f"€ {iva_50_versare:,.2f}")
 
   st.divider()
 
-  st.markdown("### 🚑 Alert Certificati Medici Agonistici Calcio a 11")
+  st.markdown("### 🚑 Alert Certificati Medici Agonistici")
   if not df_cert_alert.empty:
     for _, r in df_cert_alert.iterrows():
       if r["Scadenza"] < today:
@@ -303,232 +298,454 @@ if menu == "Dashboard & Alert Scadenze":
     st.dataframe(df_cert_alert, use_container_width=True)
   else:
     st.success(
-        "✅ Tutti i calciatori risultano con certificato medico agonistico in"
+        "✅ Tutti i tesserati risultano con certificato medico agonistico in"
         " corso di validità."
     )
 
 # ---------------------------------------------------------
-# 2. CALCIATORI & CERTIFICATI MEDICI
+# 2. SOCI, ATLETI & DIRIGENZA
 # ---------------------------------------------------------
-elif menu == "Calciatori & Certificati Medici":
-  st.subheader("🏃 Anagrafica Calciatori Calcio a 11 e Idoneità Medica")
+elif menu == "Soci, Atleti & Dirigenza":
+  st.subheader("🏃 Gestione Anagrafiche: Soci, Dirigenza e Atleti")
 
-  with st.expander("➕ Inserisci Singolo Calciatore / Tesserato"):
-    with st.form("nuovo_calciatore", clear_on_submit=True):
-      c1, c2, c3 = st.columns(3)
-      nome = c1.text_input("Cognome e Nome Calciatore*")
-      cf = c2.text_input("Codice Fiscale")
-      matricola = c3.text_input("Matricola FIGC / LND")
+  tab_list, tab_add, tab_edit = st.tabs([
+      "📋 Elenco Anagrafiche & Filtri",
+      "➕ Inserimento & Importazione",
+      "✏️ Modifica / Elimina Scheda",
+  ])
 
-      c4, c5, c6 = st.columns(3)
-      categoria = c4.selectbox(
-          "Categoria Squadra",
-          [
-              "PRIMA_SQUADRA",
-              "JUNIORES",
-              "ALLIEVI",
-              "GIOVANISSIMI",
-              "SCUOLA_CALCIO",
-              "STAFF",
-          ],
-      )
-      ruolo = c5.selectbox(
-          "Ruolo",
-          [
-              "Portiere",
-              "Difensore",
-              "Centrocampista",
-              "Attaccante",
-              "Allenatore",
-              "Dirigente",
-          ],
-      )
-      quota = c6.number_input(
-          "Quota Stagionale / Frequenza (€)", min_value=0.0, step=50.0
+  CATEGORIE_LISTA = [
+      "DIRIGENZA",
+      "STAFF",
+      "PRIMA_SQUADRA",
+      "JUNIORES",
+      "ALLIEVI",
+      "GIOVANISSIMI",
+      "SCUOLA_CALCIO",
+      "SOCIO",
+  ]
+  RUOLI_LISTA = [
+      "Presidente",
+      "Vice Presidente",
+      "Consigliere",
+      "Dirigente",
+      "Dirigente Accompagnatore",
+      "Segretario",
+      "Allenatore",
+      "Portiere",
+      "Difensore",
+      "Centrocampista",
+      "Attaccante",
+      "Socio",
+  ]
+
+  with tab_list:
+    filtro_cat = st.selectbox("Filtra per Categoria / Ruolo", ["TUTTI"] + CATEGORIE_LISTA)
+
+    query_anag = """
+            SELECT a.denominazione as Nome, 
+                   t.categoria as Categoria, 
+                   t.ruolo as Ruolo, 
+                   a.codice_fiscale as 'Codice Fiscale',
+                   t.matricola_figc as Matricola, 
+                   t.quota_stagionale as 'Quota (€)', 
+                   c.data_scadenza as 'Scadenza Medico', 
+                   t.stato as Stato
+            FROM anagrafiche a
+            LEFT JOIN tesserati_calcio t ON t.anagrafica_id = a.id
+            LEFT JOIN certificati_medici c ON c.anagrafica_id = a.id
+            WHERE a.tipo IN ('SOCIO_CALCIATORE', 'ALTRO')
+        """
+    if filtro_cat != "TUTTI":
+      query_anag += f" AND t.categoria = '{filtro_cat}'"
+    query_anag += " ORDER BY t.categoria, a.denominazione"
+
+    df_anag_view = pd.read_sql_query(query_anag, conn)
+    st.dataframe(df_anag_view, use_container_width=True)
+
+  with tab_add:
+    with st.expander("➕ Inserisci Singola Persona / Dirigente / Atleta"):
+      with st.form("nuovo_tesserato_form", clear_on_submit=True):
+        c1, c2, c3 = st.columns(3)
+        nome = c1.text_input("Cognome e Nome*")
+        cf = c2.text_input("Codice Fiscale")
+        matricola = c3.text_input("Matricola FIGC / LND")
+
+        c4, c5, c6 = st.columns(3)
+        categoria = c4.selectbox("Categoria / Inquadramento", CATEGORIE_LISTA)
+        ruolo = c5.selectbox("Ruolo", RUOLI_LISTA)
+        quota = c6.number_input(
+            "Quota Stagionale / Frequenza (€)", min_value=0.0, step=10.0
+        )
+
+        st.markdown("---")
+        st.write("**Certificato Medico Agonistico**")
+        cm1, cm2, cm3 = st.columns(3)
+        data_ril = cm1.date_input("Data Rilascio Certificato")
+        data_scad = cm2.date_input("Data Scadenza Certificato")
+        medico = cm3.text_input("Medico Certificatore / Centro")
+
+        if st.form_submit_button("Salva in Anagrafica"):
+          if nome:
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT INTO anagrafiche (tipo, denominazione, codice_fiscale)"
+                " VALUES ('SOCIO_CALCIATORE', ?, ?)",
+                (nome, cf),
+            )
+            anag_id = cursor.lastrowid
+
+            cursor.execute(
+                """
+                            INSERT INTO tesserati_calcio (anagrafica_id, matricola_figc, categoria, ruolo, data_tesseramento, quota_stagionale)
+                            VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                (
+                    anag_id,
+                    matricola,
+                    categoria,
+                    ruolo,
+                    str(datetime.date.today()),
+                    quota,
+                ),
+            )
+
+            cursor.execute(
+                """
+                            INSERT INTO certificati_medici (anagrafica_id, tipo, data_rilascio, data_scadenza, medico_certificatore, stato_idoneita)
+                            VALUES (?, 'AGONISTICO', ?, ?, ?, 'IDONEO')
+                        """,
+                (anag_id, str(data_ril), str(data_scad), medico),
+            )
+
+            conn.commit()
+            st.success(f"{nome} salvato con successo in anagrafica!")
+            st.rerun()
+
+    with st.expander("📥 Importazione Massiva da File Excel (.xlsx)"):
+      buffer = io.BytesIO()
+      df_template_demo = pd.DataFrame([{
+          "Cognome_Nome": "Rossi Mario",
+          "Codice_Fiscale": "RSSMRA90A01H501U",
+          "Matricola_FIGC": "1234567",
+          "Categoria": "DIRIGENZA",
+          "Ruolo": "Dirigente",
+          "Quota_Associativa": 30.00,
+          "Quota_Stagionale": 0.00,
+          "Data_Rilascio_Certificato": "2026-06-01",
+          "Scadenza_Certificato": "2027-05-31",
+      }])
+
+      with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        df_template_demo.to_excel(writer, index=False, sheet_name="Tesserati")
+
+      st.download_button(
+          label="📄 Scarica File Modello Excel (.xlsx)",
+          data=buffer.getvalue(),
+          file_name="template_tesserati_asd.xlsx",
+          mime=(
+              "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+          ),
       )
 
       st.markdown("---")
-      st.write("**Certificato Medico Agonistico**")
-      cm1, cm2, cm3 = st.columns(3)
-      data_ril = cm1.date_input("Data Rilascio Certificato")
-      data_scad = cm2.date_input("Data Scadenza Certificato")
-      medico = cm3.text_input("Medico Certificatore / Centro")
 
-      if st.form_submit_button("Salva Calciatore e Certificato"):
-        if nome:
-          cursor = conn.cursor()
-          cursor.execute(
-              "INSERT INTO anagrafiche (tipo, denominazione, codice_fiscale)"
-              " VALUES ('SOCIO_CALCIATORE', ?, ?)",
-              (nome, cf),
-          )
-          anag_id = cursor.lastrowid
+      uploaded_excel = st.file_uploader(
+          "Seleziona il file Excel compilato da caricare", type=["xlsx", "xls"]
+      )
 
-          cursor.execute(
-              """
-                        INSERT INTO tesserati_calcio (anagrafica_id, matricola_figc, categoria, ruolo, data_tesseramento, quota_stagionale)
-                        VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-              (
-                  anag_id,
-                  matricola,
-                  categoria,
-                  ruolo,
-                  str(datetime.date.today()),
-                  quota,
-              ),
-          )
+      if uploaded_excel is not None:
+        try:
+          df_import = pd.read_excel(uploaded_excel)
+          st.write("📋 **Anteprima dei dati rilevati nel file:**")
+          st.dataframe(df_import.head(10), use_container_width=True)
 
-          cursor.execute(
-              """
-                        INSERT INTO certificati_medici (anagrafica_id, tipo, data_rilascio, data_scadenza, medico_certificatore, stato_idoneita)
-                        VALUES (?, 'AGONISTICO', ?, ?, ?, 'IDONEO')
-                    """,
-              (anag_id, str(data_ril), str(data_scad), medico),
-          )
+          if st.button("🚀 Conferma Importazione Dati nel Database"):
+            cursor = conn.cursor()
+            count = 0
 
-          conn.commit()
-          st.success(f"Calciatore {nome} registrato con successo!")
-          st.rerun()
-
-  with st.expander("📥 Importazione Una Tantum Calciatori da File Excel (.xlsx)"):
-    buffer = io.BytesIO()
-    df_template_demo = pd.DataFrame([{
-        "Cognome_Nome": "Rossi Mario",
-        "Codice_Fiscale": "RSSMRA90A01H501U",
-        "Matricola_FIGC": "1234567",
-        "Categoria": "PRIMA_SQUADRA",
-        "Ruolo": "Centrocampista",
-        "Quota_Associativa": 30.00,
-        "Quota_Stagionale": 300.00,
-        "Data_Rilascio_Certificato": "2026-06-01",
-        "Scadenza_Certificato": "2027-05-31",
-    }])
-
-    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-      df_template_demo.to_excel(writer, index=False, sheet_name="Tesserati")
-
-    st.download_button(
-        label="📄 Scarica File Modello Excel (.xlsx)",
-        data=buffer.getvalue(),
-        file_name="template_tesserati_asd.xlsx",
-        mime=(
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        ),
-    )
-
-    st.markdown("---")
-
-    uploaded_excel = st.file_uploader(
-        "Seleziona il file Excel dei tesserati compilato da caricare",
-        type=["xlsx", "xls"],
-    )
-
-    if uploaded_excel is not None:
-      try:
-        df_import = pd.read_excel(uploaded_excel)
-        st.write("📋 **Anteprima dei dati rilevati nel file:**")
-        st.dataframe(df_import.head(10), use_container_width=True)
-
-        if st.button("🚀 Conferma Importazione Dati nel Database"):
-          cursor = conn.cursor()
-          count = 0
-
-          for _, row in df_import.iterrows():
-            nome = str(row.get("Cognome_Nome", "")).strip()
-            cf = (
-                str(row.get("Codice_Fiscale", "")).strip()
-                if pd.notna(row.get("Codice_Fiscale"))
-                else ""
-            )
-            matricola = (
-                str(row.get("Matricola_FIGC", "")).strip()
-                if pd.notna(row.get("Matricola_FIGC"))
-                else ""
-            )
-            categoria = (
-                str(row.get("Categoria", "PRIMA_SQUADRA")).strip()
-                if pd.notna(row.get("Categoria"))
-                else "PRIMA_SQUADRA"
-            )
-            ruolo = (
-                str(row.get("Ruolo", "Calciatore")).strip()
-                if pd.notna(row.get("Ruolo"))
-                else "Calciatore"
-            )
-            quota_assoc = (
-                float(row.get("Quota_Associativa", 0.0))
-                if pd.notna(row.get("Quota_Associativa"))
-                else 0.0
-            )
-            quota_stag = (
-                float(row.get("Quota_Stagionale", 0.0))
-                if pd.notna(row.get("Quota_Stagionale"))
-                else 0.0
-            )
-            data_ril = (
-                str(row.get("Data_Rilascio_Certificato", "")).strip()[:10]
-                if pd.notna(row.get("Data_Rilascio_Certificato"))
-                else ""
-            )
-            scad_medica = (
-                str(row.get("Scadenza_Certificato", "")).strip()[:10]
-                if pd.notna(row.get("Scadenza_Certificato"))
-                else ""
-            )
-
-            if nome and nome.lower() != "nan":
-              cursor.execute(
-                  "INSERT INTO anagrafiche (tipo, denominazione,"
-                  " codice_fiscale) VALUES ('SOCIO_CALCIATORE', ?, ?)",
-                  (nome, cf),
+            for _, row in df_import.iterrows():
+              nome = str(row.get("Cognome_Nome", "")).strip()
+              cf = (
+                  str(row.get("Codice_Fiscale", "")).strip()
+                  if pd.notna(row.get("Codice_Fiscale"))
+                  else ""
               )
-              anag_id = cursor.lastrowid
-
-              cursor.execute(
-                  """
-                            INSERT INTO tesserati_calcio (anagrafica_id, matricola_figc, categoria, ruolo, data_tesseramento, quota_stagionale)
-                            VALUES (?, ?, ?, ?, strftime('%Y-%m-%d', 'now'), ?)
-                        """,
-                  (anag_id, matricola, categoria, ruolo, quota_stag),
+              matricola = (
+                  str(row.get("Matricola_FIGC", "")).strip()
+                  if pd.notna(row.get("Matricola_FIGC"))
+                  else ""
+              )
+              categoria = (
+                  str(row.get("Categoria", "DIRIGENZA")).strip()
+                  if pd.notna(row.get("Categoria"))
+                  else "DIRIGENZA"
+              )
+              ruolo = (
+                  str(row.get("Ruolo", "Dirigente")).strip()
+                  if pd.notna(row.get("Ruolo"))
+                  else "Dirigente"
+              )
+              quota_stag = (
+                  float(row.get("Quota_Stagionale", 0.0))
+                  if pd.notna(row.get("Quota_Stagionale"))
+                  else 0.0
+              )
+              data_ril = (
+                  str(row.get("Data_Rilascio_Certificato", "")).strip()[:10]
+                  if pd.notna(row.get("Data_Rilascio_Certificato"))
+                  else ""
+              )
+              scad_medica = (
+                  str(row.get("Scadenza_Certificato", "")).strip()[:10]
+                  if pd.notna(row.get("Scadenza_Certificato"))
+                  else ""
               )
 
-              if scad_medica and scad_medica.lower() != "nan":
-                rilascio = (
-                    data_ril
-                    if (data_ril and data_ril.lower() != "nan")
-                    else "2026-01-01"
+              if nome and nome.lower() != "nan":
+                cursor.execute(
+                    "INSERT INTO anagrafiche (tipo, denominazione,"
+                    " codice_fiscale) VALUES ('SOCIO_CALCIATORE', ?, ?)",
+                    (nome, cf),
                 )
+                anag_id = cursor.lastrowid
+
                 cursor.execute(
                     """
-                                INSERT INTO certificati_medici (anagrafica_id, tipo, data_rilascio, data_scadenza, stato_idoneita)
-                                VALUES (?, 'AGONISTICO', ?, ?, 'IDONEO')
+                                INSERT INTO tesserati_calcio (anagrafica_id, matricola_figc, categoria, ruolo, data_tesseramento, quota_stagionale)
+                                VALUES (?, ?, ?, ?, strftime('%Y-%m-%d', 'now'), ?)
                             """,
-                    (anag_id, rilascio, scad_medica),
+                    (anag_id, matricola, categoria, ruolo, quota_stag),
                 )
 
-              count += 1
+                if scad_medica and scad_medica.lower() != "nan":
+                  rilascio = (
+                      data_ril
+                      if (data_ril and data_ril.lower() != "nan")
+                      else "2026-01-01"
+                  )
+                  cursor.execute(
+                      """
+                                    INSERT INTO certificati_medici (anagrafica_id, tipo, data_rilascio, data_scadenza, stato_idoneita)
+                                    VALUES (?, 'AGONISTICO', ?, ?, 'IDONEO')
+                                """,
+                      (anag_id, rilascio, scad_medica),
+                  )
+
+                count += 1
+
+            conn.commit()
+            st.success(
+                f"✅ Importazione completata! Inseriti {count} record nel DB."
+            )
+            st.rerun()
+
+        except Exception as e:
+          st.error(f"Errore durante la lettura del file Excel: {e}")
+
+  with tab_edit:
+    st.markdown("### ✏️ Modifica Dati Scheda Anagrafica")
+
+    df_all_anag = pd.read_sql_query(
+        """
+            SELECT a.id as anag_id, a.denominazione, a.codice_fiscale,
+                   t.id as tesserato_id, t.matricola_figc, t.categoria, t.ruolo, t.quota_stagionale, t.stato,
+                   c.id as cert_id, c.data_rilascio, c.data_scadenza, c.medico_certificatore, c.stato_idoneita
+            FROM anagrafiche a
+            LEFT JOIN tesserati_calcio t ON t.anagrafica_id = a.id
+            LEFT JOIN certificati_medici c ON c.anagrafica_id = a.id
+            WHERE a.tipo IN ('SOCIO_CALCIATORE', 'ALTRO')
+            ORDER BY a.denominazione
+        """,
+        conn,
+    )
+
+    if not df_all_anag.empty:
+      anag_options = {
+          f"{row['denominazione']} ({row['categoria'] or 'N.D.'} -"
+          f" {row['ruolo'] or 'N.D.'})": row["anag_id"]
+          for _, row in df_all_anag.iterrows()
+      }
+      selected_label = st.selectbox(
+          "Seleziona Persona da Modificare", list(anag_options.keys())
+      )
+      selected_anag_id = anag_options[selected_label]
+
+      person = df_all_anag[df_all_anag["anag_id"] == selected_anag_id].iloc[0]
+
+      with st.form("form_edit_anagrafica"):
+        st.markdown(f"#### Scheda di: **{person['denominazione']}**")
+        e_col1, e_col2, e_col3 = st.columns(3)
+        e_nome = e_col1.text_input(
+            "Cognome e Nome*", value=person["denominazione"]
+        )
+        e_cf = e_col2.text_input(
+            "Codice Fiscale", value=person["codice_fiscale"] or ""
+        )
+        e_matricola = e_col3.text_input(
+            "Matricola FIGC / LND", value=person["matricola_figc"] or ""
+        )
+
+        e_col4, e_col5, e_col6 = st.columns(3)
+        cur_cat = (
+            person["categoria"]
+            if person["categoria"] in CATEGORIE_LISTA
+            else "DIRIGENZA"
+        )
+        e_categoria = e_col4.selectbox(
+            "Categoria / Inquadramento",
+            CATEGORIE_LISTA,
+            index=CATEGORIE_LISTA.index(cur_cat),
+        )
+
+        cur_role = (
+            person["ruolo"] if person["ruolo"] in RUOLI_LISTA else "Dirigente"
+        )
+        e_ruolo = e_col5.selectbox(
+            "Ruolo", RUOLI_LISTA, index=RUOLI_LISTA.index(cur_role)
+        )
+
+        e_quota = e_col6.number_input(
+            "Quota Stagionale / Frequenza (€)",
+            value=float(person["quota_stagionale"] or 0.0),
+            step=10.0,
+        )
+
+        e_col7 = st.columns(1)[0]
+        st_opts = ["ATTIVO", "INATTIVO", "IN_PRESTITO"]
+        cur_st = person["stato"] if person["stato"] in st_opts else "ATTIVO"
+        e_stato = e_col7.selectbox(
+            "Stato Scheda", st_opts, index=st_opts.index(cur_st)
+        )
+
+        st.markdown("---")
+        st.write("**Certificato Medico Agonistico**")
+        m_col1, m_col2, m_col3 = st.columns(3)
+
+        try:
+          d_ril = (
+              datetime.datetime.strptime(
+                  person["data_rilascio"], "%Y-%m-%d"
+              ).date()
+              if person["data_rilascio"]
+              else datetime.date.today()
+          )
+        except Exception:
+          d_ril = datetime.date.today()
+
+        try:
+          d_scad = (
+              datetime.datetime.strptime(
+                  person["data_scadenza"], "%Y-%m-%d"
+              ).date()
+              if person["data_scadenza"]
+              else datetime.date.today()
+          )
+        except Exception:
+          d_scad = datetime.date.today()
+
+        e_data_ril = m_col1.date_input("Data Rilascio Certificato", value=d_ril)
+        e_data_scad = m_col2.date_input(
+            "Data Scadenza Certificato", value=d_scad
+        )
+        e_medico = m_col3.text_input(
+            "Medico Certificatore", value=person["medico_certificatore"] or ""
+        )
+
+        if st.form_submit_button("💾 Salva Modifiche Scheda"):
+          cursor = conn.cursor()
+          cursor.execute(
+              "UPDATE anagrafiche SET denominazione = ?, codice_fiscale = ?"
+              " WHERE id = ?",
+              (e_nome, e_cf, selected_anag_id),
+          )
+
+          if pd.notna(person["tesserato_id"]):
+            cursor.execute(
+                """
+                            UPDATE tesserati_calcio 
+                            SET matricola_figc = ?, categoria = ?, ruolo = ?, quota_stagionale = ?, stato = ?
+                            WHERE id = ?
+                        """,
+                (
+                    e_matricola,
+                    e_categoria,
+                    e_ruolo,
+                    e_quota,
+                    e_stato,
+                    person["tesserato_id"],
+                ),
+            )
+          else:
+            cursor.execute(
+                """
+                            INSERT INTO tesserati_calcio (anagrafica_id, matricola_figc, categoria, ruolo, data_tesseramento, quota_stagionale, stato)
+                            VALUES (?, ?, ?, ?, strftime('%Y-%m-%d', 'now'), ?, ?)
+                        """,
+                (
+                    selected_anag_id,
+                    e_matricola,
+                    e_categoria,
+                    e_ruolo,
+                    e_quota,
+                    e_stato,
+                ),
+            )
+
+          if pd.notna(person["cert_id"]):
+            cursor.execute(
+                """
+                            UPDATE certificati_medici
+                            SET data_rilascio = ?, data_scadenza = ?, medico_certificatore = ?
+                            WHERE id = ?
+                        """,
+                (
+                    str(e_data_ril),
+                    str(e_data_scad),
+                    e_medico,
+                    person["cert_id"],
+                ),
+            )
+          elif e_data_scad:
+            cursor.execute(
+                """
+                            INSERT INTO certificati_medici (anagrafica_id, tipo, data_rilascio, data_scadenza, medico_certificatore, stato_idoneita)
+                            VALUES (?, 'AGONISTICO', ?, ?, ?, 'IDONEO')
+                        """,
+                (
+                    selected_anag_id,
+                    str(e_data_ril),
+                    str(e_data_scad),
+                    e_medico,
+                ),
+            )
 
           conn.commit()
-          st.success(f"✅ Importazione completata! Inseriti {count} tesserati.")
+          st.success(f"Scheda di {e_nome} aggiornata con successo!")
           st.rerun()
 
-      except Exception as e:
-        st.error(f"Errore durante la lettura del file Excel: {e}")
-
-  st.divider()
-  df_tesserati = pd.read_sql_query(
-      """
-        SELECT a.denominazione as Calciatore, t.matricola_figc as Matricola, t.categoria as Categoria, t.ruolo as Ruolo, 
-               t.quota_stagionale as 'Quota Stagionale (€)', c.data_scadenza as 'Scadenza Medico', c.stato_idoneita as Idoneità
-        FROM tesserati_calcio t
-        JOIN anagrafiche a ON t.anagrafica_id = a.id
-        LEFT JOIN certificati_medici c ON c.anagrafica_id = a.id
-        ORDER BY t.categoria, a.denominazione
-    """,
-      conn,
-  )
-  st.dataframe(df_tesserati, use_container_width=True)
+      st.divider()
+      with st.expander("🗑️ Elimina Scheda Anagrafica"):
+        st.warning(
+            "Attenzione: questa operazione rimuoverà definitivamente la persona"
+            " e i suoi dati associati."
+        )
+        if st.button("❌ Conferma Eliminazione Definitiva Persona"):
+          cursor = conn.cursor()
+          cursor.execute(
+              "DELETE FROM certificati_medici WHERE anagrafica_id = ?",
+              (selected_anag_id,),
+          )
+          cursor.execute(
+              "DELETE FROM tesserati_calcio WHERE anagrafica_id = ?",
+              (selected_anag_id,),
+          )
+          cursor.execute(
+              "DELETE FROM anagrafiche WHERE id = ?", (selected_anag_id,)
+          )
+          conn.commit()
+          st.success("Anagrafica eliminata con successo!")
+          st.rerun()
 
 # ---------------------------------------------------------
 # 3. RICEVUTE ISTITUZIONALI (ART. 4 DPR 633/72)
@@ -632,7 +849,9 @@ elif menu == "Ricevute Istituzionali (Art. 4)":
               if pagamento == "BONIFICO"
               else ("10.01.003" if pagamento == "PAYPAL" else "10.01.002")
           )
-          cod_ricavo = "50.01.001" if "Annua" in tipo_causale else "50.01.002"
+          cod_ricavo = (
+              "50.01.001" if "Annua" in tipo_causale else "50.01.002"
+          )
 
           cursor.execute(
               "SELECT id FROM piano_dei_conti WHERE codice = ?",
@@ -975,7 +1194,7 @@ elif menu == "Lavoro Sportivo & Rimborsi (D.Lgs. 36)":
         st.rerun()
 
 # ---------------------------------------------------------
-# 6. RICONCILIAZIONE ESTRATTI CONTO (AGGIORNATO E CORRETTO)
+# 6. RICONCILIAZIONE ESTRATTI CONTO
 # ---------------------------------------------------------
 elif menu == "Riconciliazione Estratti Conto":
   st.subheader("🏦 Riconciliazione Movimenti Bancari e PayPal")
@@ -1010,12 +1229,7 @@ elif menu == "Riconciliazione Estratti Conto":
             f"✅ Rilevati **{len(df_parsed)}** movimenti dal file"
             f" `{uploaded_file.name}`."
         )
-        st.info(
-            "💡 **Puoi modificare o correggere i dati direttamente nella"
-            " tabella sottostante** prima di cliccare su *Salva nel Database*."
-        )
 
-        # Editor di testo interattivo per la modifica immediata
         edited_df = st.data_editor(
             df_parsed,
             num_rows="dynamic",
@@ -1040,7 +1254,7 @@ elif menu == "Riconciliazione Estratti Conto":
             },
         )
 
-        col_save, col_clear = st.columns([2, 1])
+        col_save, _ = st.columns([2, 1])
         if col_save.button("💾 Salva e Importa Movimenti nel Database"):
           cursor = conn.cursor()
           saved_count = 0
@@ -1075,14 +1289,19 @@ elif menu == "Riconciliazione Estratti Conto":
         )
 
   with tab_saved:
-    st.markdown("### 📖 Movimenti Salvi in Archivio")
+    st.markdown("### 📖 Movimenti Salvati in Archivio")
 
     filtro_stato = st.selectbox(
         "Filtra per Stato Riconciliazione",
         ["TUTTI", "DA_RICONCILIARE", "RICONCILIATO"],
     )
 
-    query_str = "SELECT id, fonte as Fonte, data_transazione as Data, descrizione as Descrizione, importo_lordo as 'Lordo (€)', commissione as 'Commissione (€)', importo_netto as 'Netto (€)', stato_riconciliazione as Stato FROM estratti_conto_importati"
+    query_str = (
+        "SELECT id, fonte as Fonte, data_transazione as Data, descrizione as"
+        " Descrizione, importo_lordo as 'Lordo (€)', commissione as 'Commissione"
+        " (€)', importo_netto as 'Netto (€)', stato_riconciliazione as Stato"
+        " FROM estratti_conto_importati"
+    )
     if filtro_stato != "TUTTI":
       query_str += f" WHERE stato_riconciliazione = '{filtro_stato}'"
     query_str += " ORDER BY id DESC"
@@ -1131,7 +1350,7 @@ elif menu == "Riconciliazione Estratti Conto":
           st.success("Movimento eliminato dal database!")
           st.rerun()
     else:
-        st.info("Nessun movimento bancario salvato nel database.")
+      st.info("Nessun movimento bancario salvato nel database.")
 
   with tab_manual:
     st.markdown("### ➕ Inserimento Manuale Singolo Movimento Bancario")
