@@ -396,25 +396,22 @@ elif menu == "Soci, Atleti & Dirigenza":
             anag_id = int(cursor.lastrowid)
 
             cursor.execute(
-                """
-                            INSERT INTO tesserati_calcio (anagrafica_id, matricola_figc, categoria, ruolo, data_tesseramento, quota_stagionale)
-                            VALUES (?, ?, ?, ?, ?, ?)
-                        """,
+                "INSERT INTO tesserati_calcio (anagrafica_id, matricola_figc,"
+                " categoria, ruolo, data_tesseramento, quota_stagionale) VALUES"
+                " (?, ?, ?, ?, strftime('%Y-%m-%d', 'now'), ?)",
                 (
                     anag_id,
                     str(matricola),
                     str(categoria),
                     str(ruolo),
-                    str(datetime.date.today()),
                     float(quota),
                 ),
             )
 
             cursor.execute(
-                """
-                            INSERT INTO certificati_medici (anagrafica_id, tipo, data_rilascio, data_scadenza, medico_certificatore, stato_idoneita)
-                            VALUES (?, 'AGONISTICO', ?, ?, ?, 'IDONEO')
-                        """,
+                "INSERT INTO certificati_medici (anagrafica_id, tipo,"
+                " data_rilascio, data_scadenza, medico_certificatore,"
+                " stato_idoneita) VALUES (?, 'AGONISTICO', ?, ?, ?, 'IDONEO')",
                 (anag_id, str(data_ril), str(data_scad), str(medico)),
             )
 
@@ -511,10 +508,10 @@ elif menu == "Soci, Atleti & Dirigenza":
                 anag_id = int(cursor.lastrowid)
 
                 cursor.execute(
-                    """
-                                INSERT INTO tesserati_calcio (anagrafica_id, matricola_figc, categoria, ruolo, data_tesseramento, quota_stagionale)
-                                VALUES (?, ?, ?, ?, strftime('%Y-%m-%d', 'now'), ?)
-                            """,
+                    "INSERT INTO tesserati_calcio (anagrafica_id,"
+                    " matricola_figc, categoria, ruolo, data_tesseramento,"
+                    " quota_stagionale) VALUES (?, ?, ?, ?, strftime('%Y-%m-%d',"
+                    " 'now'), ?)",
                     (anag_id, matricola, categoria, ruolo, quota_stag),
                 )
 
@@ -525,10 +522,9 @@ elif menu == "Soci, Atleti & Dirigenza":
                       else "2026-01-01"
                   )
                   cursor.execute(
-                      """
-                                    INSERT INTO certificati_medici (anagrafica_id, tipo, data_rilascio, data_scadenza, stato_idoneita)
-                                    VALUES (?, 'AGONISTICO', ?, ?, 'IDONEO')
-                                """,
+                      "INSERT INTO certificati_medici (anagrafica_id, tipo,"
+                      " data_rilascio, data_scadenza, stato_idoneita) VALUES (?,"
+                      " 'AGONISTICO', ?, ?, 'IDONEO')",
                       (anag_id, rilascio, scad_medica),
                   )
 
@@ -572,8 +568,8 @@ elif menu == "Soci, Atleti & Dirigenza":
       anag_row = cursor.fetchone()
 
       cursor.execute(
-          "SELECT matricola_figc, categoria, ruolo, quota_stagionale, stato FROM"
-          " tesserati_calcio WHERE anagrafica_id = ?",
+          "SELECT matricola_figc, categoria, ruolo, quota_stagionale, stato"
+          " FROM tesserati_calcio WHERE anagrafica_id = ?",
           (selected_anag_id,),
       )
       tess_row = cursor.fetchone()
@@ -585,26 +581,26 @@ elif menu == "Soci, Atleti & Dirigenza":
       )
       cert_row = cursor.fetchone()
 
-      cur_nome = anag_row[0] if anag_row else ""
-      cur_cf = anag_row[1] if anag_row else ""
+      cur_nome = str(anag_row[0]) if (anag_row and anag_row[0]) else ""
+      cur_cf = str(anag_row[1]) if (anag_row and anag_row[1]) else ""
 
-      cur_matricola = tess_row[0] if tess_row else ""
-      cur_cat = tess_row[1] if tess_row else "DIRIGENZA"
-      cur_role = tess_row[2] if tess_row else "Dirigente"
-      cur_quota = tess_row[3] if tess_row else 0.0
-      cur_stato = tess_row[4] if tess_row else "ATTIVO"
+      cur_matricola = str(tess_row[0]) if (tess_row and tess_row[0]) else ""
+      cur_cat = str(tess_row[1]) if (tess_row and tess_row[1]) else "DIRIGENZA"
+      cur_role = str(tess_row[2]) if (tess_row and tess_row[2]) else "Dirigente"
+      cur_quota = float(tess_row[3]) if (tess_row and tess_row[3]) else 0.0
+      cur_stato = str(tess_row[4]) if (tess_row and tess_row[4]) else "ATTIVO"
 
-      cur_ril = cert_row[0] if cert_row else ""
-      cur_scad = cert_row[1] if cert_row else ""
-      cur_medico = cert_row[2] if cert_row else ""
+      cur_ril = str(cert_row[0]) if (cert_row and cert_row[0]) else ""
+      cur_scad = str(cert_row[1]) if (cert_row and cert_row[1]) else ""
+      cur_medico = str(cert_row[2]) if (cert_row and cert_row[2]) else ""
 
       with st.form("form_edit_anagrafica"):
         st.markdown(f"#### Scheda di: **{cur_nome}**")
         e_col1, e_col2, e_col3 = st.columns(3)
-        e_nome = e_col1.text_input("Cognome e Nome*", value=str(cur_nome or ""))
-        e_cf = e_col2.text_input("Codice Fiscale", value=str(cur_cf or ""))
+        e_nome = e_col1.text_input("Cognome e Nome*", value=cur_nome)
+        e_cf = e_col2.text_input("Codice Fiscale", value=cur_cf)
         e_matricola = e_col3.text_input(
-            "Matricola FIGC / LND", value=str(cur_matricola or "")
+            "Matricola FIGC / LND", value=cur_matricola
         )
 
         e_col4, e_col5, e_col6 = st.columns(3)
@@ -626,7 +622,7 @@ elif menu == "Soci, Atleti & Dirigenza":
 
         e_quota = e_col6.number_input(
             "Quota Stagionale / Frequenza (€)",
-            value=float(cur_quota or 0.0),
+            value=float(cur_quota),
             step=10.0,
         )
 
@@ -641,7 +637,7 @@ elif menu == "Soci, Atleti & Dirigenza":
 
         try:
           d_ril = (
-              datetime.datetime.strptime(str(cur_ril), "%Y-%m-%d").date()
+              datetime.datetime.strptime(cur_ril, "%Y-%m-%d").date()
               if cur_ril
               else datetime.date.today()
           )
@@ -650,7 +646,7 @@ elif menu == "Soci, Atleti & Dirigenza":
 
         try:
           d_scad = (
-              datetime.datetime.strptime(str(cur_scad), "%Y-%m-%d").date()
+              datetime.datetime.strptime(cur_scad, "%Y-%m-%d").date()
               if cur_scad
               else datetime.date.today()
           )
@@ -658,10 +654,10 @@ elif menu == "Soci, Atleti & Dirigenza":
           d_scad = datetime.date.today()
 
         e_data_ril = m_col1.date_input("Data Rilascio Certificato", value=d_ril)
-        e_data_scad = m_col2.date_input("Data Scadenza Certificato", value=d_scad)
-        e_medico = m_col3.text_input(
-            "Medico Certificatore", value=str(cur_medico or "")
+        e_data_scad = m_col2.date_input(
+            "Data Scadenza Certificato", value=d_scad
         )
+        e_medico = m_col3.text_input("Medico Certificatore", value=cur_medico)
 
         if st.form_submit_button("💾 Salva Modifiche Scheda"):
           cursor = conn.cursor()
@@ -678,11 +674,9 @@ elif menu == "Soci, Atleti & Dirigenza":
           )
           if cursor.fetchone():
             cursor.execute(
-                """
-                            UPDATE tesserati_calcio 
-                            SET matricola_figc = ?, categoria = ?, ruolo = ?, quota_stagionale = ?, stato = ?
-                            WHERE anagrafica_id = ?
-                        """,
+                "UPDATE tesserati_calcio SET matricola_figc = ?, categoria = ?,"
+                " ruolo = ?, quota_stagionale = ?, stato = ? WHERE"
+                " anagrafica_id = ?",
                 (
                     str(e_matricola).strip(),
                     str(e_categoria),
@@ -694,10 +688,10 @@ elif menu == "Soci, Atleti & Dirigenza":
             )
           else:
             cursor.execute(
-                """
-                            INSERT INTO tesserati_calcio (anagrafica_id, matricola_figc, categoria, ruolo, data_tesseramento, quota_stagionale, stato)
-                            VALUES (?, ?, ?, ?, strftime('%Y-%m-%d', 'now'), ?, ?)
-                        """,
+                "INSERT INTO tesserati_calcio (anagrafica_id, matricola_figc,"
+                " categoria, ruolo, data_tesseramento, quota_stagionale,"
+                " stato) VALUES (?, ?, ?, ?, strftime('%Y-%m-%d', 'now'), ?,"
+                " ?)",
                 (
                     selected_anag_id,
                     str(e_matricola).strip(),
@@ -714,11 +708,9 @@ elif menu == "Soci, Atleti & Dirigenza":
           )
           if cursor.fetchone():
             cursor.execute(
-                """
-                            UPDATE certificati_medici
-                            SET data_rilascio = ?, data_scadenza = ?, medico_certificatore = ?
-                            WHERE anagrafica_id = ?
-                        """,
+                "UPDATE certificati_medici SET data_rilascio = ?,"
+                " data_scadenza = ?, medico_certificatore = ? WHERE"
+                " anagrafica_id = ?",
                 (
                     str(e_data_ril),
                     str(e_data_scad),
@@ -728,10 +720,9 @@ elif menu == "Soci, Atleti & Dirigenza":
             )
           elif e_data_scad:
             cursor.execute(
-                """
-                            INSERT INTO certificati_medici (anagrafica_id, tipo, data_rilascio, data_scadenza, medico_certificatore, stato_idoneita)
-                            VALUES (?, 'AGONISTICO', ?, ?, ?, 'IDONEO')
-                        """,
+                "INSERT INTO certificati_medici (anagrafica_id, tipo,"
+                " data_rilascio, data_scadenza, medico_certificatore,"
+                " stato_idoneita) VALUES (?, 'AGONISTICO', ?, ?, ?, 'IDONEO')",
                 (
                     selected_anag_id,
                     str(e_data_ril),
@@ -843,10 +834,10 @@ elif menu == "Ricevute Istituzionali (Art. 4)":
         if importo > 0:
           cursor = conn.cursor()
           cursor.execute(
-              """
-                        INSERT INTO ricevute_istituzionali (numero_ricevuta, data_emissione, anagrafica_id, causale, importo, modalita_pagamento, marca_da_bollo)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """,
+              "INSERT INTO ricevute_istituzionali (numero_ricevuta,"
+              " data_emissione, anagrafica_id, causale, importo,"
+              " modalita_pagamento, marca_da_bollo) VALUES (?, ?, ?, ?, ?, ?,"
+              " ?)",
               (
                   str(num_ric),
                   str(data_ric),
@@ -859,10 +850,9 @@ elif menu == "Ricevute Istituzionali (Art. 4)":
           )
 
           cursor.execute(
-              """
-                        INSERT INTO movimenti_prima_nota (data_registrazione, numero_documento, causale, tipo_attivita)
-                        VALUES (?, ?, ?, 'ISTITUZIONALE')
-                    """,
+              "INSERT INTO movimenti_prima_nota (data_registrazione,"
+              " numero_documento, causale, tipo_attivita) VALUES (?, ?, ?,"
+              " 'ISTITUZIONALE')",
               (str(data_ric), str(num_ric), f"Incasso {tipo_causale} da {socio_sel}"),
           )
           mov_id = int(cursor.lastrowid)
@@ -995,10 +985,10 @@ elif menu == "Sponsor & Pubblicità (398/98)":
       ):
         cursor = conn.cursor()
         cursor.execute(
-            """
-                    INSERT INTO fatture_sponsor_398 (numero_fattura, data_fattura, sponsor_id, oggetto_contratto, imponibile, aliquota_iva, iva_totale, totale_fattura, iva_da_versare_50, stima_ires_3)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
+            "INSERT INTO fatture_sponsor_398 (numero_fattura, data_fattura,"
+            " sponsor_id, oggetto_contratto, imponibile, aliquota_iva,"
+            " iva_totale, totale_fattura, iva_da_versare_50, stima_ires_3)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 str(num_fat),
                 str(data_fat),
@@ -1014,10 +1004,9 @@ elif menu == "Sponsor & Pubblicità (398/98)":
         )
 
         cursor.execute(
-            """
-                    INSERT INTO movimenti_prima_nota (data_registrazione, numero_documento, causale, tipo_attivita)
-                    VALUES (?, ?, ?, 'COMMERCIALE_398')
-                """,
+            "INSERT INTO movimenti_prima_nota (data_registrazione,"
+            " numero_documento, causale, tipo_attivita) VALUES (?, ?, ?,"
+            " 'COMMERCIALE_398')",
             (str(data_fat), str(num_fat), f"Fattura Sponsor {spon_sel}"),
         )
         mov_id = int(cursor.lastrowid)
@@ -1141,10 +1130,10 @@ elif menu == "Lavoro Sportivo & Rimborsi (D.Lgs. 36)":
           importo_netto = importo_lordo - rit_inps - rit_irpef
 
           cursor.execute(
-              """
-                        INSERT INTO compensi_sportivi (collaboratore_id, data_erogazione, causale, importo_lordo, progressivo_inps_anno, progressivo_irpef_anno, ritenuta_inps, ritenuta_irpef, importo_netto)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
+              "INSERT INTO compensi_sportivi (collaboratore_id,"
+              " data_erogazione, causale, importo_lordo, progressivo_inps_anno,"
+              " progressivo_irpef_anno, ritenuta_inps, ritenuta_irpef,"
+              " importo_netto) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
               (
                   coll_id,
                   str(data_erog),
@@ -1201,10 +1190,10 @@ elif menu == "Lavoro Sportivo & Rimborsi (D.Lgs. 36)":
       if st.form_submit_button("Registra Distinta Rimborso Trasferta"):
         cursor = conn.cursor()
         cursor.execute(
-            """
-                    INSERT INTO rimborsi_trasferta (anagrafica_id, data_partita, incontro_calcio, luogo_trasferta, km_percorsi, tariffa_aci, spese_pie_di_lista, totale_rimborso)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
+            "INSERT INTO rimborsi_trasferta (anagrafica_id, data_partita,"
+            " incontro_calcio, luogo_trasferta, km_percorsi, tariffa_aci,"
+            " spese_pie_di_lista, totale_rimborso) VALUES (?, ?, ?, ?, ?, ?,"
+            " ?, ?)",
             (
                 int(a_dict[atleta_sel]),
                 str(data_partita),
@@ -1296,10 +1285,9 @@ elif menu == "Riconciliazione Estratti Conto":
             st_ric = str(row.get("stato_riconciliazione", "DA_RICONCILIARE"))
 
             cursor.execute(
-                """
-                            INSERT INTO estratti_conto_importati (fonte, data_transazione, descrizione, importo_lordo, commissione, importo_netto, stato_riconciliazione)
-                            VALUES (?, ?, ?, ?, ?, ?, ?)
-                        """,
+                "INSERT INTO estratti_conto_importati (fonte, data_transazione,"
+                " descrizione, importo_lordo, commissione, importo_netto,"
+                " stato_riconciliazione) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (fonte_str, d_trans, desc_t, imp_l, comm_t, imp_n, st_ric),
             )
             saved_count += 1
@@ -1404,10 +1392,10 @@ elif menu == "Riconciliazione Estratti Conto":
           m_netto = float(m_lordo) - float(m_comm)
           cursor = conn.cursor()
           cursor.execute(
-              """
-                        INSERT INTO estratti_conto_importati (fonte, data_transazione, descrizione, importo_lordo, commissione, importo_netto, stato_riconciliazione)
-                        VALUES (?, ?, ?, ?, ?, ?, 'DA_RICONCILIARE')
-                    """,
+              "INSERT INTO estratti_conto_importati (fonte, data_transazione,"
+              " descrizione, importo_lordo, commissione, importo_netto,"
+              " stato_riconciliazione) VALUES (?, ?, ?, ?, ?, ?,"
+              " 'DA_RICONCILIARE')",
               (
                   str(m_fonte),
                   str(m_data),
@@ -1489,19 +1477,15 @@ elif menu == "Prima Nota & Rendiconto ASD":
           if importo_dare > 0 and importo_dare == importo_avere:
             cursor = conn.cursor()
             cursor.execute(
-                """
-                        INSERT INTO movimenti_prima_nota (data_registrazione, numero_documento, causale, tipo_attivita)
-                        VALUES (?, ?, ?, ?)
-                    """,
+                "INSERT INTO movimenti_prima_nota (data_registrazione,"
+                " numero_documento, causale, tipo_attivita) VALUES (?, ?, ?, ?)",
                 (str(data_reg), str(num_doc), str(causale), str(tipo_att)),
             )
             mov_id = int(cursor.lastrowid)
 
             cursor.execute(
-                """
-                        INSERT INTO righe_prima_nota (movimento_id, sottoconto_id, descrizione, dare, avere)
-                        VALUES (?, ?, ?, ?, 0.00)
-                    """,
+                "INSERT INTO righe_prima_nota (movimento_id, sottoconto_id,"
+                " descrizione, dare, avere) VALUES (?, ?, ?, ?, 0.00)",
                 (
                     mov_id,
                     int(pdc_dict[conto_dare]),
@@ -1511,10 +1495,8 @@ elif menu == "Prima Nota & Rendiconto ASD":
             )
 
             cursor.execute(
-                """
-                        INSERT INTO righe_prima_nota (movimento_id, sottoconto_id, descrizione, dare, avere)
-                        VALUES (?, ?, ?, 0.00, ?)
-                    """,
+                "INSERT INTO righe_prima_nota (movimento_id, sottoconto_id,"
+                " descrizione, dare, avere) VALUES (?, ?, ?, 0.00, ?)",
                 (
                     mov_id,
                     int(pdc_dict[conto_avere]),
