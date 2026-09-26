@@ -560,39 +560,79 @@ elif menu == "Soci, Atleti & Dirigenza":
       )
       selected_anag_id = int(people_dict[selected_label])
 
-      cursor = conn.cursor()
-      cursor.execute(
+      # Lettura isolata e sicura tramite DataFrame per evitare conflitti di cursore
+      df_a = pd.read_sql_query(
           "SELECT denominazione, codice_fiscale FROM anagrafiche WHERE id = ?",
-          [selected_anag_id],
+          conn,
+          params=[selected_anag_id],
       )
-      anag_row = cursor.fetchone()
-
-      cursor.execute(
+      df_t = pd.read_sql_query(
           "SELECT matricola_figc, categoria, ruolo, quota_stagionale, stato"
           " FROM tesserati_calcio WHERE anagrafica_id = ?",
-          [selected_anag_id],
+          conn,
+          params=[selected_anag_id],
       )
-      tess_row = cursor.fetchone()
-
-      cursor.execute(
+      df_c = pd.read_sql_query(
           "SELECT data_rilascio, data_scadenza, medico_certificatore FROM"
           " certificati_medici WHERE anagrafica_id = ?",
-          [selected_anag_id],
+          conn,
+          params=[selected_anag_id],
       )
-      cert_row = cursor.fetchone()
 
-      cur_nome = str(anag_row[0]) if (anag_row and anag_row[0]) else ""
-      cur_cf = str(anag_row[1]) if (anag_row and anag_row[1]) else ""
+      cur_nome = (
+          str(df_a["denominazione"].iloc[0])
+          if not df_a.empty and pd.notna(df_a["denominazione"].iloc[0])
+          else ""
+      )
+      cur_cf = (
+          str(df_a["codice_fiscale"].iloc[0])
+          if not df_a.empty and pd.notna(df_a["codice_fiscale"].iloc[0])
+          else ""
+      )
 
-      cur_matricola = str(tess_row[0]) if (tess_row and tess_row[0]) else ""
-      cur_cat = str(tess_row[1]) if (tess_row and tess_row[1]) else "DIRIGENZA"
-      cur_role = str(tess_row[2]) if (tess_row and tess_row[2]) else "Dirigente"
-      cur_quota = float(tess_row[3]) if (tess_row and tess_row[3]) else 0.0
-      cur_stato = str(tess_row[4]) if (tess_row and tess_row[4]) else "ATTIVO"
+      has_tess = not df_t.empty
+      cur_matricola = (
+          str(df_t["matricola_figc"].iloc[0])
+          if has_tess and pd.notna(df_t["matricola_figc"].iloc[0])
+          else ""
+      )
+      cur_cat = (
+          str(df_t["categoria"].iloc[0])
+          if has_tess and pd.notna(df_t["categoria"].iloc[0])
+          else "DIRIGENZA"
+      )
+      cur_role = (
+          str(df_t["ruolo"].iloc[0])
+          if has_tess and pd.notna(df_t["ruolo"].iloc[0])
+          else "Dirigente"
+      )
+      cur_quota = (
+          float(df_t["quota_stagionale"].iloc[0])
+          if has_tess and pd.notna(df_t["quota_stagionale"].iloc[0])
+          else 0.0
+      )
+      cur_stato = (
+          str(df_t["stato"].iloc[0])
+          if has_tess and pd.notna(df_t["stato"].iloc[0])
+          else "ATTIVO"
+      )
 
-      cur_ril = str(cert_row[0]) if (cert_row and cert_row[0]) else ""
-      cur_scad = str(cert_row[1]) if (cert_row and cert_row[1]) else ""
-      cur_medico = str(cert_row[2]) if (cert_row and cert_row[2]) else ""
+      has_cert = not df_c.empty
+      cur_ril = (
+          str(df_c["data_rilascio"].iloc[0])
+          if has_cert and pd.notna(df_c["data_rilascio"].iloc[0])
+          else ""
+      )
+      cur_scad = (
+          str(df_c["data_scadenza"].iloc[0])
+          if has_cert and pd.notna(df_c["data_scadenza"].iloc[0])
+          else ""
+      )
+      cur_medico = (
+          str(df_c["medico_certificatore"].iloc[0])
+          if has_cert and pd.notna(df_c["medico_certificatore"].iloc[0])
+          else ""
+      )
 
       with st.form("form_edit_anagrafica"):
         st.markdown(f"#### Scheda di: **{cur_nome}**")
@@ -660,20 +700,16 @@ elif menu == "Soci, Atleti & Dirigenza":
         e_medico = m_col3.text_input("Medico Certificatore", value=cur_medico)
 
         if st.form_submit_button("💾 Salva Modifiche Scheda"):
-          cursor = conn.cursor()
+          c = conn.cursor()
 
-          cursor.execute(
+          c.execute(
               "UPDATE anagrafiche SET denominazione = ?, codice_fiscale = ?"
               " WHERE id = ?",
               [str(e_nome).strip(), str(e_cf).strip(), selected_anag_id],
           )
 
-          cursor.execute(
-              "SELECT id FROM tesserati_calcio WHERE anagrafica_id = ?",
-              [selected_anag_id],
-          )
-          if cursor.fetchone():
-            cursor.execute(
+          if has_tess:
+            c.execute(
                 "UPDATE tesserati_calcio SET matricola_figc = ?, categoria = ?,"
                 " ruolo = ?, quota_stagionale = ?, stato = ? WHERE"
                 " anagrafica_id = ?",
@@ -687,7 +723,7 @@ elif menu == "Soci, Atleti & Dirigenza":
                 ],
             )
           else:
-            cursor.execute(
+            c.execute(
                 "INSERT INTO tesserati_calcio (anagrafica_id, matricola_figc,"
                 " categoria, ruolo, data_tesseramento, quota_stagionale,"
                 " stato) VALUES (?, ?, ?, ?, strftime('%Y-%m-%d', 'now'), ?,"
@@ -702,12 +738,8 @@ elif menu == "Soci, Atleti & Dirigenza":
                 ],
             )
 
-          cursor.execute(
-              "SELECT id FROM certificati_medici WHERE anagrafica_id = ?",
-              [selected_anag_id],
-          )
-          if cursor.fetchone():
-            cursor.execute(
+          if has_cert:
+            c.execute(
                 "UPDATE certificati_medici SET data_rilascio = ?,"
                 " data_scadenza = ?, medico_certificatore = ? WHERE"
                 " anagrafica_id = ?",
@@ -719,7 +751,7 @@ elif menu == "Soci, Atleti & Dirigenza":
                 ],
             )
           elif e_data_scad:
-            cursor.execute(
+            c.execute(
                 "INSERT INTO certificati_medici (anagrafica_id, tipo,"
                 " data_rilascio, data_scadenza, medico_certificatore,"
                 " stato_idoneita) VALUES (?, 'AGONISTICO', ?, ?, ?, 'IDONEO')",
@@ -742,18 +774,16 @@ elif menu == "Soci, Atleti & Dirigenza":
           " e i suoi dati associati."
       )
       if st.button("❌ Conferma Eliminazione Definitiva Persona"):
-        cursor = conn.cursor()
-        cursor.execute(
+        c = conn.cursor()
+        c.execute(
             "DELETE FROM certificati_medici WHERE anagrafica_id = ?",
             [selected_anag_id],
         )
-        cursor.execute(
+        c.execute(
             "DELETE FROM tesserati_calcio WHERE anagrafica_id = ?",
             [selected_anag_id],
         )
-        cursor.execute(
-            "DELETE FROM anagrafiche WHERE id = ?", [selected_anag_id]
-        )
+        c.execute("DELETE FROM anagrafiche WHERE id = ?", [selected_anag_id])
         conn.commit()
         st.success("Anagrafica eliminata con successo!")
         st.rerun()
@@ -832,6 +862,30 @@ elif menu == "Ricevute Istituzionali (Art. 4)":
 
       if st.form_submit_button("Emetti Ricevuta e Registra in Prima Nota"):
         if importo > 0:
+          cod_cassa_banca = (
+              "10.01.001"
+              if pagamento == "BONIFICO"
+              else ("10.01.003" if pagamento == "PAYPAL" else "10.01.002")
+          )
+          cod_ricavo = (
+              "50.01.001" if "Annua" in tipo_causale else "50.01.002"
+          )
+
+          acc_fin = int(
+              pd.read_sql_query(
+                  "SELECT id FROM piano_dei_conti WHERE codice = ?",
+                  conn,
+                  params=[cod_cassa_banca],
+              )["id"].iloc[0]
+          )
+          acc_ric = int(
+              pd.read_sql_query(
+                  "SELECT id FROM piano_dei_conti WHERE codice = ?",
+                  conn,
+                  params=[cod_ricavo],
+              )["id"].iloc[0]
+          )
+
           cursor = conn.cursor()
           cursor.execute(
               "INSERT INTO ricevute_istituzionali (numero_ricevuta,"
@@ -856,25 +910,6 @@ elif menu == "Ricevute Istituzionali (Art. 4)":
               [str(data_ric), str(num_ric), f"Incasso {tipo_causale} da {socio_sel}"],
           )
           mov_id = int(cursor.lastrowid)
-
-          cod_cassa_banca = (
-              "10.01.001"
-              if pagamento == "BONIFICO"
-              else ("10.01.003" if pagamento == "PAYPAL" else "10.01.002")
-          )
-          cod_ricavo = (
-              "50.01.001" if "Annua" in tipo_causale else "50.01.002"
-          )
-
-          cursor.execute(
-              "SELECT id FROM piano_dei_conti WHERE codice = ?",
-              [cod_cassa_banca],
-          )
-          acc_fin = int(cursor.fetchone()[0])
-          cursor.execute(
-              "SELECT id FROM piano_dei_conti WHERE codice = ?", [cod_ricavo]
-          )
-          acc_ric = int(cursor.fetchone()[0])
 
           cursor.execute(
               "INSERT INTO righe_prima_nota (movimento_id, sottoconto_id,"
@@ -983,6 +1018,22 @@ elif menu == "Sponsor & Pubblicità (398/98)":
       if st.form_submit_button(
           "Registra Fattura 398/98 in Archivio e Registro"
       ):
+        acc_cred = int(
+            pd.read_sql_query(
+                "SELECT id FROM piano_dei_conti WHERE codice = '10.02.002'", conn
+            )["id"].iloc[0]
+        )
+        acc_ric = int(
+            pd.read_sql_query(
+                "SELECT id FROM piano_dei_conti WHERE codice = '50.02.001'", conn
+            )["id"].iloc[0]
+        )
+        acc_iva = int(
+            pd.read_sql_query(
+                "SELECT id FROM piano_dei_conti WHERE codice = '20.02.001'", conn
+            )["id"].iloc[0]
+        )
+
         cursor = conn.cursor()
         cursor.execute(
             "INSERT INTO fatture_sponsor_398 (numero_fattura, data_fattura,"
@@ -1010,19 +1061,6 @@ elif menu == "Sponsor & Pubblicità (398/98)":
             [str(data_fat), str(num_fat), f"Fattura Sponsor {spon_sel}"],
         )
         mov_id = int(cursor.lastrowid)
-
-        cursor.execute(
-            "SELECT id FROM piano_dei_conti WHERE codice = '10.02.002'"
-        )
-        acc_cred = int(cursor.fetchone()[0])
-        cursor.execute(
-            "SELECT id FROM piano_dei_conti WHERE codice = '50.02.001'"
-        )
-        acc_ric = int(cursor.fetchone()[0])
-        cursor.execute(
-            "SELECT id FROM piano_dei_conti WHERE codice = '20.02.001'"
-        )
-        acc_iva = int(cursor.fetchone()[0])
 
         cursor.execute(
             "INSERT INTO righe_prima_nota (movimento_id, sottoconto_id,"
