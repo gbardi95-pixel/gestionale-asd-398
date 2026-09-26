@@ -275,7 +275,7 @@ if menu == "Dashboard & Alert Scadenze":
   )["tot"].iloc[0]
 
   k1, k2, k3, k4 = st.columns(4)
-  k1.metric("Totale Anagrafiche Attive", num_tesserati)
+  k1.metric("Totale Anagrafiche Attive", int(num_tesserati))
   k2.metric("Quote Incassate (Istituzionale)", f"€ {tot_quote:,.2f}")
   k3.metric("Ricavi Sponsor (398/98)", f"€ {tot_sponsor:,.2f}")
   k4.metric("IVA 398/98 da Versare (50%)", f"€ {iva_50_versare:,.2f}")
@@ -391,9 +391,9 @@ elif menu == "Soci, Atleti & Dirigenza":
             cursor.execute(
                 "INSERT INTO anagrafiche (tipo, denominazione, codice_fiscale)"
                 " VALUES ('SOCIO_CALCIATORE', ?, ?)",
-                (nome, cf),
+                (str(nome), str(cf)),
             )
-            anag_id = cursor.lastrowid
+            anag_id = int(cursor.lastrowid)
 
             cursor.execute(
                 """
@@ -402,11 +402,11 @@ elif menu == "Soci, Atleti & Dirigenza":
                         """,
                 (
                     anag_id,
-                    matricola,
-                    categoria,
-                    ruolo,
+                    str(matricola),
+                    str(categoria),
+                    str(ruolo),
                     str(datetime.date.today()),
-                    quota,
+                    float(quota),
                 ),
             )
 
@@ -415,7 +415,7 @@ elif menu == "Soci, Atleti & Dirigenza":
                             INSERT INTO certificati_medici (anagrafica_id, tipo, data_rilascio, data_scadenza, medico_certificatore, stato_idoneita)
                             VALUES (?, 'AGONISTICO', ?, ?, ?, 'IDONEO')
                         """,
-                (anag_id, str(data_ril), str(data_scad), medico),
+                (anag_id, str(data_ril), str(data_scad), str(medico)),
             )
 
             conn.commit()
@@ -508,7 +508,7 @@ elif menu == "Soci, Atleti & Dirigenza":
                     " codice_fiscale) VALUES ('SOCIO_CALCIATORE', ?, ?)",
                     (nome, cf),
                 )
-                anag_id = cursor.lastrowid
+                anag_id = int(cursor.lastrowid)
 
                 cursor.execute(
                     """
@@ -562,14 +562,14 @@ elif menu == "Soci, Atleti & Dirigenza":
 
     if not df_all_anag.empty:
       anag_options = {
-          f"{row['denominazione']} ({row['categoria'] or 'N.D.'} -"
-          f" {row['ruolo'] or 'N.D.'})": row["anag_id"]
+          f"{row['denominazione']} ({row['categoria'] if pd.notna(row['categoria']) else 'N.D.'} -"
+          f" {row['ruolo'] if pd.notna(row['ruolo']) else 'N.D.'})": int(row["anag_id"])
           for _, row in df_all_anag.iterrows()
       }
       selected_label = st.selectbox(
           "Seleziona Persona da Modificare", list(anag_options.keys())
       )
-      selected_anag_id = anag_options[selected_label]
+      selected_anag_id = int(anag_options[selected_label])
 
       person = df_all_anag[df_all_anag["anag_id"] == selected_anag_id].iloc[0]
 
@@ -577,19 +577,21 @@ elif menu == "Soci, Atleti & Dirigenza":
         st.markdown(f"#### Scheda di: **{person['denominazione']}**")
         e_col1, e_col2, e_col3 = st.columns(3)
         e_nome = e_col1.text_input(
-            "Cognome e Nome*", value=person["denominazione"]
+            "Cognome e Nome*", value=str(person["denominazione"] or "")
         )
         e_cf = e_col2.text_input(
-            "Codice Fiscale", value=person["codice_fiscale"] or ""
+            "Codice Fiscale",
+            value=str(person["codice_fiscale"] or "") if pd.notna(person["codice_fiscale"]) else "",
         )
         e_matricola = e_col3.text_input(
-            "Matricola FIGC / LND", value=person["matricola_figc"] or ""
+            "Matricola FIGC / LND",
+            value=str(person["matricola_figc"] or "") if pd.notna(person["matricola_figc"]) else "",
         )
 
         e_col4, e_col5, e_col6 = st.columns(3)
         cur_cat = (
-            person["categoria"]
-            if person["categoria"] in CATEGORIE_LISTA
+            str(person["categoria"])
+            if pd.notna(person["categoria"]) and str(person["categoria"]) in CATEGORIE_LISTA
             else "DIRIGENZA"
         )
         e_categoria = e_col4.selectbox(
@@ -599,21 +601,28 @@ elif menu == "Soci, Atleti & Dirigenza":
         )
 
         cur_role = (
-            person["ruolo"] if person["ruolo"] in RUOLI_LISTA else "Dirigente"
+            str(person["ruolo"])
+            if pd.notna(person["ruolo"]) and str(person["ruolo"]) in RUOLI_LISTA
+            else "Dirigente"
         )
         e_ruolo = e_col5.selectbox(
             "Ruolo", RUOLI_LISTA, index=RUOLI_LISTA.index(cur_role)
         )
 
+        quota_val = float(person["quota_stagionale"]) if pd.notna(person["quota_stagionale"]) else 0.0
         e_quota = e_col6.number_input(
             "Quota Stagionale / Frequenza (€)",
-            value=float(person["quota_stagionale"] or 0.0),
+            value=quota_val,
             step=10.0,
         )
 
         e_col7 = st.columns(1)[0]
         st_opts = ["ATTIVO", "INATTIVO", "IN_PRESTITO"]
-        cur_st = person["stato"] if person["stato"] in st_opts else "ATTIVO"
+        cur_st = (
+            str(person["stato"])
+            if pd.notna(person["stato"]) and str(person["stato"]) in st_opts
+            else "ATTIVO"
+        )
         e_stato = e_col7.selectbox(
             "Stato Scheda", st_opts, index=st_opts.index(cur_st)
         )
@@ -625,9 +634,9 @@ elif menu == "Soci, Atleti & Dirigenza":
         try:
           d_ril = (
               datetime.datetime.strptime(
-                  person["data_rilascio"], "%Y-%m-%d"
+                  str(person["data_rilascio"]), "%Y-%m-%d"
               ).date()
-              if person["data_rilascio"]
+              if pd.notna(person["data_rilascio"]) and str(person["data_rilascio"]).strip() != ""
               else datetime.date.today()
           )
         except Exception:
@@ -636,9 +645,9 @@ elif menu == "Soci, Atleti & Dirigenza":
         try:
           d_scad = (
               datetime.datetime.strptime(
-                  person["data_scadenza"], "%Y-%m-%d"
+                  str(person["data_scadenza"]), "%Y-%m-%d"
               ).date()
-              if person["data_scadenza"]
+              if pd.notna(person["data_scadenza"]) and str(person["data_scadenza"]).strip() != ""
               else datetime.date.today()
           )
         except Exception:
@@ -648,8 +657,9 @@ elif menu == "Soci, Atleti & Dirigenza":
         e_data_scad = m_col2.date_input(
             "Data Scadenza Certificato", value=d_scad
         )
+        medico_val = str(person["medico_certificatore"]) if pd.notna(person["medico_certificatore"]) else ""
         e_medico = m_col3.text_input(
-            "Medico Certificatore", value=person["medico_certificatore"] or ""
+            "Medico Certificatore", value=medico_val
         )
 
         if st.form_submit_button("💾 Salva Modifiche Scheda"):
@@ -657,7 +667,7 @@ elif menu == "Soci, Atleti & Dirigenza":
           cursor.execute(
               "UPDATE anagrafiche SET denominazione = ?, codice_fiscale = ?"
               " WHERE id = ?",
-              (e_nome, e_cf, selected_anag_id),
+              (str(e_nome), str(e_cf), int(selected_anag_id)),
           )
 
           if pd.notna(person["tesserato_id"]):
@@ -668,12 +678,12 @@ elif menu == "Soci, Atleti & Dirigenza":
                             WHERE id = ?
                         """,
                 (
-                    e_matricola,
-                    e_categoria,
-                    e_ruolo,
-                    e_quota,
-                    e_stato,
-                    person["tesserato_id"],
+                    str(e_matricola),
+                    str(e_categoria),
+                    str(e_ruolo),
+                    float(e_quota),
+                    str(e_stato),
+                    int(person["tesserato_id"]),
                 ),
             )
           else:
@@ -683,12 +693,12 @@ elif menu == "Soci, Atleti & Dirigenza":
                             VALUES (?, ?, ?, ?, strftime('%Y-%m-%d', 'now'), ?, ?)
                         """,
                 (
-                    selected_anag_id,
-                    e_matricola,
-                    e_categoria,
-                    e_ruolo,
-                    e_quota,
-                    e_stato,
+                    int(selected_anag_id),
+                    str(e_matricola),
+                    str(e_categoria),
+                    str(e_ruolo),
+                    float(e_quota),
+                    str(e_stato),
                 ),
             )
 
@@ -702,8 +712,8 @@ elif menu == "Soci, Atleti & Dirigenza":
                 (
                     str(e_data_ril),
                     str(e_data_scad),
-                    e_medico,
-                    person["cert_id"],
+                    str(e_medico),
+                    int(person["cert_id"]),
                 ),
             )
           elif e_data_scad:
@@ -713,10 +723,10 @@ elif menu == "Soci, Atleti & Dirigenza":
                             VALUES (?, 'AGONISTICO', ?, ?, ?, 'IDONEO')
                         """,
                 (
-                    selected_anag_id,
+                    int(selected_anag_id),
                     str(e_data_ril),
                     str(e_data_scad),
-                    e_medico,
+                    str(e_medico),
                 ),
             )
 
@@ -734,14 +744,14 @@ elif menu == "Soci, Atleti & Dirigenza":
           cursor = conn.cursor()
           cursor.execute(
               "DELETE FROM certificati_medici WHERE anagrafica_id = ?",
-              (selected_anag_id,),
+              (int(selected_anag_id),),
           )
           cursor.execute(
               "DELETE FROM tesserati_calcio WHERE anagrafica_id = ?",
-              (selected_anag_id,),
+              (int(selected_anag_id),),
           )
           cursor.execute(
-              "DELETE FROM anagrafiche WHERE id = ?", (selected_anag_id,)
+              "DELETE FROM anagrafiche WHERE id = ?", (int(selected_anag_id),)
           )
           conn.commit()
           st.success("Anagrafica eliminata con successo!")
@@ -764,7 +774,7 @@ elif menu == "Ricevute Istituzionali (Art. 4)":
           cursor.execute(
               "INSERT INTO anagrafiche (tipo, denominazione, codice_fiscale,"
               " email) VALUES ('SOCIO_CALCIATORE', ?, ?, ?)",
-              (s_nome, s_cf, s_email),
+              (str(s_nome), str(s_cf), str(s_email)),
           )
           conn.commit()
           st.success(f"Socio '{s_nome}' aggiunto in anagrafica!")
@@ -783,7 +793,10 @@ elif menu == "Ricevute Istituzionali (Art. 4)":
       num_ric = col1.text_input("Numero Ricevuta", value="1/2026")
       data_ric = col2.date_input("Data Emissione")
 
-      soci_dict = dict(zip(df_soci["denominazione"], df_soci["id"]))
+      soci_dict = {
+          row["denominazione"]: int(row["id"])
+          for _, row in df_soci.iterrows()
+      }
       socio_sel = col3.selectbox(
           "Socio / Tesserato / Versante", list(soci_dict.keys())
       )
@@ -825,13 +838,13 @@ elif menu == "Ricevute Istituzionali (Art. 4)":
                         VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
               (
-                  num_ric,
+                  str(num_ric),
                   str(data_ric),
-                  soci_dict[socio_sel],
-                  causale_completa,
-                  importo,
-                  pagamento,
-                  bollo,
+                  int(soci_dict[socio_sel]),
+                  str(causale_completa),
+                  float(importo),
+                  str(pagamento),
+                  float(bollo),
               ),
           )
 
@@ -840,9 +853,9 @@ elif menu == "Ricevute Istituzionali (Art. 4)":
                         INSERT INTO movimenti_prima_nota (data_registrazione, numero_documento, causale, tipo_attivita)
                         VALUES (?, ?, ?, 'ISTITUZIONALE')
                     """,
-              (str(data_ric), num_ric, f"Incasso {tipo_causale} da {socio_sel}"),
+              (str(data_ric), str(num_ric), f"Incasso {tipo_causale} da {socio_sel}"),
           )
-          mov_id = cursor.lastrowid
+          mov_id = int(cursor.lastrowid)
 
           cod_cassa_banca = (
               "10.01.001"
@@ -857,23 +870,23 @@ elif menu == "Ricevute Istituzionali (Art. 4)":
               "SELECT id FROM piano_dei_conti WHERE codice = ?",
               (cod_cassa_banca,),
           )
-          acc_fin = cursor.fetchone()[0]
+          acc_fin = int(cursor.fetchone()[0])
           cursor.execute(
               "SELECT id FROM piano_dei_conti WHERE codice = ?", (cod_ricavo,)
           )
-          acc_ric = cursor.fetchone()[0]
+          acc_ric = int(cursor.fetchone()[0])
 
           cursor.execute(
               "INSERT INTO righe_prima_nota (movimento_id, sottoconto_id,"
               " descrizione, dare, avere) VALUES (?, ?, 'Incasso Quota', ?,"
               " 0.0)",
-              (mov_id, acc_fin, importo),
+              (mov_id, acc_fin, float(importo)),
           )
           cursor.execute(
               "INSERT INTO righe_prima_nota (movimento_id, sottoconto_id,"
               " descrizione, dare, avere) VALUES (?, ?, 'Ricavo Istituzionale',"
               " 0.0, ?)",
-              (mov_id, acc_ric, importo),
+              (mov_id, acc_ric, float(importo)),
           )
 
           conn.commit()
@@ -921,7 +934,7 @@ elif menu == "Sponsor & Pubblicità (398/98)":
             "INSERT INTO anagrafiche (tipo, denominazione, partita_iva,"
             " codice_fiscale, codice_destinatario) VALUES ('SPONSOR', ?, ?,"
             " ?, ?)",
-            (s_nome, s_piva, s_cf, s_sdi),
+            (str(s_nome), str(s_piva), str(s_cf), str(s_sdi)),
         )
         conn.commit()
         st.success(f"Sponsor {s_nome} registrato!")
@@ -937,7 +950,10 @@ elif menu == "Sponsor & Pubblicità (398/98)":
       col1, col2, col3 = st.columns(3)
       num_fat = col1.text_input("Numero Fattura", value="1/398")
       data_fat = col2.date_input("Data Fattura")
-      spon_dict = dict(zip(df_sponsor["denominazione"], df_sponsor["id"]))
+      spon_dict = {
+          row["denominazione"]: int(row["id"])
+          for _, row in df_sponsor.iterrows()
+      }
       spon_sel = col3.selectbox("Azienda Sponsor", list(spon_dict.keys()))
 
       oggetto = st.text_input(
@@ -974,16 +990,16 @@ elif menu == "Sponsor & Pubblicità (398/98)":
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
             (
-                num_fat,
+                str(num_fat),
                 str(data_fat),
-                spon_dict[spon_sel],
-                oggetto,
-                imponibile,
-                aliquota,
-                iva_totale,
-                totale_fattura,
-                iva_da_versare_50,
-                stima_ires_3,
+                int(spon_dict[spon_sel]),
+                str(oggetto),
+                float(imponibile),
+                float(aliquota),
+                float(iva_totale),
+                float(totale_fattura),
+                float(iva_da_versare_50),
+                float(stima_ires_3),
             ),
         )
 
@@ -992,40 +1008,40 @@ elif menu == "Sponsor & Pubblicità (398/98)":
                     INSERT INTO movimenti_prima_nota (data_registrazione, numero_documento, causale, tipo_attivita)
                     VALUES (?, ?, ?, 'COMMERCIALE_398')
                 """,
-            (str(data_fat), num_fat, f"Fattura Sponsor {spon_sel}"),
+            (str(data_fat), str(num_fat), f"Fattura Sponsor {spon_sel}"),
         )
-        mov_id = cursor.lastrowid
+        mov_id = int(cursor.lastrowid)
 
         cursor.execute(
             "SELECT id FROM piano_dei_conti WHERE codice = '10.02.002'"
         )
-        acc_cred = cursor.fetchone()[0]
+        acc_cred = int(cursor.fetchone()[0])
         cursor.execute(
             "SELECT id FROM piano_dei_conti WHERE codice = '50.02.001'"
         )
-        acc_ric = cursor.fetchone()[0]
+        acc_ric = int(cursor.fetchone()[0])
         cursor.execute(
             "SELECT id FROM piano_dei_conti WHERE codice = '20.02.001'"
         )
-        acc_iva = cursor.fetchone()[0]
+        acc_iva = int(cursor.fetchone()[0])
 
         cursor.execute(
             "INSERT INTO righe_prima_nota (movimento_id, sottoconto_id,"
             " descrizione, dare, avere) VALUES (?, ?, 'Credito v/Sponsor', ?,"
             " 0.0)",
-            (mov_id, acc_cred, totale_fattura),
+            (mov_id, acc_cred, float(totale_fattura)),
         )
         cursor.execute(
             "INSERT INTO righe_prima_nota (movimento_id, sottoconto_id,"
             " descrizione, dare, avere) VALUES (?, ?, 'Ricavo Sponsor 398',"
             " 0.0, ?)",
-            (mov_id, acc_ric, imponibile),
+            (mov_id, acc_ric, float(imponibile)),
         )
         cursor.execute(
             "INSERT INTO righe_prima_nota (movimento_id, sottoconto_id,"
             " descrizione, dare, avere) VALUES (?, ?, 'IVA 398/98 50%', 0.0,"
             " ?)",
-            (mov_id, acc_iva, iva_da_versare_50),
+            (mov_id, acc_iva, float(iva_da_versare_50)),
         )
 
         conn.commit()
@@ -1073,12 +1089,10 @@ elif menu == "Lavoro Sportivo & Rimborsi (D.Lgs. 36)":
 
     with st.form("nuovo_compenso", clear_on_submit=True):
       if not df_staff.empty:
-        staff_dict = dict(
-            zip(
-                df_staff["denominazione"] + " (" + df_staff["mansione"] + ")",
-                df_staff["id"],
-            )
-        )
+        staff_dict = {
+            f"{row['denominazione']} ({row['mansione']})": int(row["id"])
+            for _, row in df_staff.iterrows()
+        }
         staff_sel = st.selectbox(
             "Seleziona Collaboratore Sportivo", list(staff_dict.keys())
         )
@@ -1100,7 +1114,7 @@ elif menu == "Lavoro Sportivo & Rimborsi (D.Lgs. 36)":
       if st.form_submit_button("Eroga Compenso e Calcola Franchigie"):
         if staff_sel:
           cursor = conn.cursor()
-          coll_id = staff_dict[staff_sel]
+          coll_id = int(staff_dict[staff_sel])
           prog_inps = (
               pd.read_sql_query(
                   "SELECT COALESCE(SUM(importo_lordo), 0.0) as tot FROM"
@@ -1124,13 +1138,13 @@ elif menu == "Lavoro Sportivo & Rimborsi (D.Lgs. 36)":
               (
                   coll_id,
                   str(data_erog),
-                  causale_c,
-                  importo_lordo,
-                  prog_inps,
-                  prog_inps,
-                  rit_inps,
-                  rit_irpef,
-                  importo_netto,
+                  str(causale_c),
+                  float(importo_lordo),
+                  float(prog_inps),
+                  float(prog_inps),
+                  float(rit_inps),
+                  float(rit_irpef),
+                  float(importo_netto),
               ),
           )
 
@@ -1146,7 +1160,10 @@ elif menu == "Lavoro Sportivo & Rimborsi (D.Lgs. 36)":
         "SELECT id, denominazione FROM anagrafiche", conn
     )
     with st.form("nuovo_rimborso", clear_on_submit=True):
-      a_dict = dict(zip(df_anag_all["denominazione"], df_anag_all["id"]))
+      a_dict = {
+          row["denominazione"]: int(row["id"])
+          for _, row in df_anag_all.iterrows()
+      }
       atleta_sel = st.selectbox(
           "Atleta / Dirigente in Trasferta", list(a_dict.keys())
       )
@@ -1179,14 +1196,14 @@ elif menu == "Lavoro Sportivo & Rimborsi (D.Lgs. 36)":
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
             (
-                a_dict[atleta_sel],
+                int(a_dict[atleta_sel]),
                 str(data_partita),
-                incontro,
-                luogo,
-                km,
-                tariffa_aci,
-                spese_doc,
-                tot_rimborso,
+                str(incontro),
+                str(luogo),
+                float(km),
+                float(tariffa_aci),
+                float(spese_doc),
+                float(tot_rimborso),
             ),
         )
         conn.commit()
@@ -1317,7 +1334,7 @@ elif menu == "Riconciliazione Estratti Conto":
       c_m1, c_m2, c_m3 = st.columns([2, 2, 1])
       mov_dict = {
           f"ID {row['id']} | {row['Data']} | {row['Descrizione']} (€"
-          f" {row['Netto (€)']:.2f})": row["id"]
+          f" {row['Netto (€)']:.2f})": int(row["id"])
           for _, row in df_db_saved.iterrows()
       }
       mov_sel = c_m1.selectbox("Seleziona Movimento", list(mov_dict.keys()))
@@ -1327,12 +1344,12 @@ elif menu == "Riconciliazione Estratti Conto":
       )
 
       if c_m3.button("Aggiorna Stato"):
-        mov_id_sel = mov_dict[mov_sel]
+        mov_id_sel = int(mov_dict[mov_sel])
         cursor = conn.cursor()
         cursor.execute(
             "UPDATE estratti_conto_importati SET stato_riconciliazione = ?"
             " WHERE id = ?",
-            (nuovo_stato, mov_id_sel),
+            (str(nuovo_stato), mov_id_sel),
         )
         conn.commit()
         st.success(f"Movimento ID {mov_id_sel} aggiornato a '{nuovo_stato}'!")
@@ -1340,7 +1357,7 @@ elif menu == "Riconciliazione Estratti Conto":
 
       with st.expander("🗑️ Elimina Movimento Selezionato"):
         if st.button("Conferma Eliminazione Record"):
-          mov_id_sel = mov_dict[mov_sel]
+          mov_id_sel = int(mov_dict[mov_sel])
           cursor = conn.cursor()
           cursor.execute(
               "DELETE FROM estratti_conto_importati WHERE id = ?",
@@ -1374,7 +1391,7 @@ elif menu == "Riconciliazione Estratti Conto":
 
       if st.form_submit_button("Salva Movimento nel Database"):
         if m_desc and m_lordo != 0.0:
-          m_netto = m_lordo - m_comm
+          m_netto = float(m_lordo) - float(m_comm)
           cursor = conn.cursor()
           cursor.execute(
               """
@@ -1382,12 +1399,12 @@ elif menu == "Riconciliazione Estratti Conto":
                         VALUES (?, ?, ?, ?, ?, ?, 'DA_RICONCILIARE')
                     """,
               (
-                  m_fonte,
+                  str(m_fonte),
                   str(m_data),
-                  m_desc,
-                  m_lordo,
-                  m_comm,
-                  m_netto,
+                  str(m_desc),
+                  float(m_lordo),
+                  float(m_comm),
+                  float(m_netto),
               ),
           )
           conn.commit()
@@ -1435,7 +1452,9 @@ elif menu == "Prima Nota & Rendiconto ASD":
             " WHERE livello = 3 ORDER BY codice",
             conn,
         )
-        pdc_dict = dict(zip(df_pdc["conto"], df_pdc["id"]))
+        pdc_dict = {
+            row["conto"]: int(row["id"]) for _, row in df_pdc.iterrows()
+        }
 
         col_d, col_a = st.columns(2)
         conto_dare = col_d.selectbox(
@@ -1464,16 +1483,21 @@ elif menu == "Prima Nota & Rendiconto ASD":
                         INSERT INTO movimenti_prima_nota (data_registrazione, numero_documento, causale, tipo_attivita)
                         VALUES (?, ?, ?, ?)
                     """,
-                (str(data_reg), num_doc, causale, tipo_att),
+                (str(data_reg), str(num_doc), str(causale), str(tipo_att)),
             )
-            mov_id = cursor.lastrowid
+            mov_id = int(cursor.lastrowid)
 
             cursor.execute(
                 """
                         INSERT INTO righe_prima_nota (movimento_id, sottoconto_id, descrizione, dare, avere)
                         VALUES (?, ?, ?, ?, 0.00)
                     """,
-                (mov_id, pdc_dict[conto_dare], causale, importo_dare),
+                (
+                    mov_id,
+                    int(pdc_dict[conto_dare]),
+                    str(causale),
+                    float(importo_dare),
+                ),
             )
 
             cursor.execute(
@@ -1481,7 +1505,12 @@ elif menu == "Prima Nota & Rendiconto ASD":
                         INSERT INTO righe_prima_nota (movimento_id, sottoconto_id, descrizione, dare, avere)
                         VALUES (?, ?, ?, 0.00, ?)
                     """,
-                (mov_id, pdc_dict[conto_avere], causale, importo_avere),
+                (
+                    mov_id,
+                    int(pdc_dict[conto_avere]),
+                    str(causale),
+                    float(importo_avere),
+                ),
             )
 
             conn.commit()
