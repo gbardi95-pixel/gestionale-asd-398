@@ -546,86 +546,94 @@ elif menu == "Soci, Atleti & Dirigenza":
   with tab_edit:
     st.markdown("### ✏️ Modifica Dati Scheda Anagrafica")
 
-    df_all_anag = pd.read_sql_query(
-        """
-            SELECT a.id as anag_id, a.denominazione, a.codice_fiscale,
-                   t.id as tesserato_id, t.matricola_figc, t.categoria, t.ruolo, t.quota_stagionale, t.stato,
-                   c.id as cert_id, c.data_rilascio, c.data_scadenza, c.medico_certificatore, c.stato_idoneita
-            FROM anagrafiche a
-            LEFT JOIN tesserati_calcio t ON t.anagrafica_id = a.id
-            LEFT JOIN certificati_medici c ON c.anagrafica_id = a.id
-            WHERE a.tipo IN ('SOCIO_CALCIATORE', 'ALTRO')
-            ORDER BY a.denominazione
-        """,
+    df_people = pd.read_sql_query(
+        "SELECT id, denominazione, codice_fiscale FROM anagrafiche WHERE tipo IN"
+        " ('SOCIO_CALCIATORE', 'ALTRO') ORDER BY denominazione",
         conn,
     )
 
-    if not df_all_anag.empty:
-      anag_options = {
-          f"{row['denominazione']} ({row['categoria'] if pd.notna(row['categoria']) else 'N.D.'} -"
-          f" {row['ruolo'] if pd.notna(row['ruolo']) else 'N.D.'})": int(row["anag_id"])
-          for _, row in df_all_anag.iterrows()
+    if not df_people.empty:
+      people_dict = {
+          f"{row['denominazione']} (CF: {row['codice_fiscale'] or 'N.D.'})": int(
+              row["id"]
+          )
+          for _, row in df_people.iterrows()
       }
       selected_label = st.selectbox(
-          "Seleziona Persona da Modificare", list(anag_options.keys())
+          "Seleziona Persona da Modificare", list(people_dict.keys())
       )
-      selected_anag_id = int(anag_options[selected_label])
+      selected_anag_id = int(people_dict[selected_label])
 
-      person = df_all_anag[df_all_anag["anag_id"] == selected_anag_id].iloc[0]
+      cursor = conn.cursor()
+      cursor.execute(
+          "SELECT denominazione, codice_fiscale FROM anagrafiche WHERE id = ?",
+          (selected_anag_id,),
+      )
+      anag_row = cursor.fetchone()
+
+      cursor.execute(
+          "SELECT matricola_figc, categoria, ruolo, quota_stagionale, stato FROM"
+          " tesserati_calcio WHERE anagrafica_id = ?",
+          (selected_anag_id,),
+      )
+      tess_row = cursor.fetchone()
+
+      cursor.execute(
+          "SELECT data_rilascio, data_scadenza, medico_certificatore FROM"
+          " certificati_medici WHERE anagrafica_id = ?",
+          (selected_anag_id,),
+      )
+      cert_row = cursor.fetchone()
+
+      cur_nome = anag_row[0] if anag_row else ""
+      cur_cf = anag_row[1] if anag_row else ""
+
+      cur_matricola = tess_row[0] if tess_row else ""
+      cur_cat = tess_row[1] if tess_row else "DIRIGENZA"
+      cur_role = tess_row[2] if tess_row else "Dirigente"
+      cur_quota = tess_row[3] if tess_row else 0.0
+      cur_stato = tess_row[4] if tess_row else "ATTIVO"
+
+      cur_ril = cert_row[0] if cert_row else ""
+      cur_scad = cert_row[1] if cert_row else ""
+      cur_medico = cert_row[2] if cert_row else ""
 
       with st.form("form_edit_anagrafica"):
-        st.markdown(f"#### Scheda di: **{person['denominazione']}**")
+        st.markdown(f"#### Scheda di: **{cur_nome}**")
         e_col1, e_col2, e_col3 = st.columns(3)
-        e_nome = e_col1.text_input(
-            "Cognome e Nome*", value=str(person["denominazione"] or "")
-        )
-        e_cf = e_col2.text_input(
-            "Codice Fiscale",
-            value=str(person["codice_fiscale"] or "") if pd.notna(person["codice_fiscale"]) else "",
-        )
+        e_nome = e_col1.text_input("Cognome e Nome*", value=str(cur_nome or ""))
+        e_cf = e_col2.text_input("Codice Fiscale", value=str(cur_cf or ""))
         e_matricola = e_col3.text_input(
-            "Matricola FIGC / LND",
-            value=str(person["matricola_figc"] or "") if pd.notna(person["matricola_figc"]) else "",
+            "Matricola FIGC / LND", value=str(cur_matricola or "")
         )
 
         e_col4, e_col5, e_col6 = st.columns(3)
-        cur_cat = (
-            str(person["categoria"])
-            if pd.notna(person["categoria"]) and str(person["categoria"]) in CATEGORIE_LISTA
-            else "DIRIGENZA"
+        cat_idx = (
+            CATEGORIE_LISTA.index(cur_cat)
+            if cur_cat in CATEGORIE_LISTA
+            else CATEGORIE_LISTA.index("DIRIGENZA")
         )
         e_categoria = e_col4.selectbox(
-            "Categoria / Inquadramento",
-            CATEGORIE_LISTA,
-            index=CATEGORIE_LISTA.index(cur_cat),
+            "Categoria / Inquadramento", CATEGORIE_LISTA, index=cat_idx
         )
 
-        cur_role = (
-            str(person["ruolo"])
-            if pd.notna(person["ruolo"]) and str(person["ruolo"]) in RUOLI_LISTA
-            else "Dirigente"
+        role_idx = (
+            RUOLI_LISTA.index(cur_role)
+            if cur_role in RUOLI_LISTA
+            else RUOLI_LISTA.index("Dirigente")
         )
-        e_ruolo = e_col5.selectbox(
-            "Ruolo", RUOLI_LISTA, index=RUOLI_LISTA.index(cur_role)
-        )
+        e_ruolo = e_col5.selectbox("Ruolo", RUOLI_LISTA, index=role_idx)
 
-        quota_val = float(person["quota_stagionale"]) if pd.notna(person["quota_stagionale"]) else 0.0
         e_quota = e_col6.number_input(
             "Quota Stagionale / Frequenza (€)",
-            value=quota_val,
+            value=float(cur_quota or 0.0),
             step=10.0,
         )
 
         e_col7 = st.columns(1)[0]
         st_opts = ["ATTIVO", "INATTIVO", "IN_PRESTITO"]
-        cur_st = (
-            str(person["stato"])
-            if pd.notna(person["stato"]) and str(person["stato"]) in st_opts
-            else "ATTIVO"
-        )
-        e_stato = e_col7.selectbox(
-            "Stato Scheda", st_opts, index=st_opts.index(cur_st)
-        )
+        st_idx = st_opts.index(cur_stato) if cur_stato in st_opts else 0
+        e_stato = e_col7.selectbox("Stato Scheda", st_opts, index=st_idx)
 
         st.markdown("---")
         st.write("**Certificato Medico Agonistico**")
@@ -633,10 +641,8 @@ elif menu == "Soci, Atleti & Dirigenza":
 
         try:
           d_ril = (
-              datetime.datetime.strptime(
-                  str(person["data_rilascio"]), "%Y-%m-%d"
-              ).date()
-              if pd.notna(person["data_rilascio"]) and str(person["data_rilascio"]).strip() != ""
+              datetime.datetime.strptime(str(cur_ril), "%Y-%m-%d").date()
+              if cur_ril
               else datetime.date.today()
           )
         except Exception:
@@ -644,46 +650,46 @@ elif menu == "Soci, Atleti & Dirigenza":
 
         try:
           d_scad = (
-              datetime.datetime.strptime(
-                  str(person["data_scadenza"]), "%Y-%m-%d"
-              ).date()
-              if pd.notna(person["data_scadenza"]) and str(person["data_scadenza"]).strip() != ""
+              datetime.datetime.strptime(str(cur_scad), "%Y-%m-%d").date()
+              if cur_scad
               else datetime.date.today()
           )
         except Exception:
           d_scad = datetime.date.today()
 
         e_data_ril = m_col1.date_input("Data Rilascio Certificato", value=d_ril)
-        e_data_scad = m_col2.date_input(
-            "Data Scadenza Certificato", value=d_scad
-        )
-        medico_val = str(person["medico_certificatore"]) if pd.notna(person["medico_certificatore"]) else ""
+        e_data_scad = m_col2.date_input("Data Scadenza Certificato", value=d_scad)
         e_medico = m_col3.text_input(
-            "Medico Certificatore", value=medico_val
+            "Medico Certificatore", value=str(cur_medico or "")
         )
 
         if st.form_submit_button("💾 Salva Modifiche Scheda"):
           cursor = conn.cursor()
+
           cursor.execute(
               "UPDATE anagrafiche SET denominazione = ?, codice_fiscale = ?"
               " WHERE id = ?",
-              (str(e_nome), str(e_cf), int(selected_anag_id)),
+              (str(e_nome).strip(), str(e_cf).strip(), selected_anag_id),
           )
 
-          if pd.notna(person["tesserato_id"]):
+          cursor.execute(
+              "SELECT id FROM tesserati_calcio WHERE anagrafica_id = ?",
+              (selected_anag_id,),
+          )
+          if cursor.fetchone():
             cursor.execute(
                 """
                             UPDATE tesserati_calcio 
                             SET matricola_figc = ?, categoria = ?, ruolo = ?, quota_stagionale = ?, stato = ?
-                            WHERE id = ?
+                            WHERE anagrafica_id = ?
                         """,
                 (
-                    str(e_matricola),
+                    str(e_matricola).strip(),
                     str(e_categoria),
                     str(e_ruolo),
                     float(e_quota),
                     str(e_stato),
-                    int(person["tesserato_id"]),
+                    selected_anag_id,
                 ),
             )
           else:
@@ -693,8 +699,8 @@ elif menu == "Soci, Atleti & Dirigenza":
                             VALUES (?, ?, ?, ?, strftime('%Y-%m-%d', 'now'), ?, ?)
                         """,
                 (
-                    int(selected_anag_id),
-                    str(e_matricola),
+                    selected_anag_id,
+                    str(e_matricola).strip(),
                     str(e_categoria),
                     str(e_ruolo),
                     float(e_quota),
@@ -702,18 +708,22 @@ elif menu == "Soci, Atleti & Dirigenza":
                 ),
             )
 
-          if pd.notna(person["cert_id"]):
+          cursor.execute(
+              "SELECT id FROM certificati_medici WHERE anagrafica_id = ?",
+              (selected_anag_id,),
+          )
+          if cursor.fetchone():
             cursor.execute(
                 """
                             UPDATE certificati_medici
                             SET data_rilascio = ?, data_scadenza = ?, medico_certificatore = ?
-                            WHERE id = ?
+                            WHERE anagrafica_id = ?
                         """,
                 (
                     str(e_data_ril),
                     str(e_data_scad),
-                    str(e_medico),
-                    int(person["cert_id"]),
+                    str(e_medico).strip(),
+                    selected_anag_id,
                 ),
             )
           elif e_data_scad:
@@ -723,39 +733,39 @@ elif menu == "Soci, Atleti & Dirigenza":
                             VALUES (?, 'AGONISTICO', ?, ?, ?, 'IDONEO')
                         """,
                 (
-                    int(selected_anag_id),
+                    selected_anag_id,
                     str(e_data_ril),
                     str(e_data_scad),
-                    str(e_medico),
+                    str(e_medico).strip(),
                 ),
             )
 
           conn.commit()
-          st.success(f"Scheda di {e_nome} aggiornata con successo!")
+          st.success(f"Scheda di {e_nome} salvata e aggiornata con successo!")
           st.rerun()
 
-      st.divider()
-      with st.expander("🗑️ Elimina Scheda Anagrafica"):
-        st.warning(
-            "Attenzione: questa operazione rimuoverà definitivamente la persona"
-            " e i suoi dati associati."
+    st.divider()
+    with st.expander("🗑️ Elimina Scheda Anagrafica"):
+      st.warning(
+          "Attenzione: questa operazione rimuoverà definitivamente la persona"
+          " e i suoi dati associati."
+      )
+      if st.button("❌ Conferma Eliminazione Definitiva Persona"):
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM certificati_medici WHERE anagrafica_id = ?",
+            (selected_anag_id,),
         )
-        if st.button("❌ Conferma Eliminazione Definitiva Persona"):
-          cursor = conn.cursor()
-          cursor.execute(
-              "DELETE FROM certificati_medici WHERE anagrafica_id = ?",
-              (int(selected_anag_id),),
-          )
-          cursor.execute(
-              "DELETE FROM tesserati_calcio WHERE anagrafica_id = ?",
-              (int(selected_anag_id),),
-          )
-          cursor.execute(
-              "DELETE FROM anagrafiche WHERE id = ?", (int(selected_anag_id),)
-          )
-          conn.commit()
-          st.success("Anagrafica eliminata con successo!")
-          st.rerun()
+        cursor.execute(
+            "DELETE FROM tesserati_calcio WHERE anagrafica_id = ?",
+            (selected_anag_id,),
+        )
+        cursor.execute(
+            "DELETE FROM anagrafiche WHERE id = ?", (selected_anag_id,)
+        )
+        conn.commit()
+        st.success("Anagrafica eliminata con successo!")
+        st.rerun()
 
 # ---------------------------------------------------------
 # 3. RICEVUTE ISTITUZIONALI (ART. 4 DPR 633/72)
