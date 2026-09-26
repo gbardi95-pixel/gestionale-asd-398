@@ -391,7 +391,7 @@ elif menu == "Soci, Atleti & Dirigenza":
             cursor.execute(
                 "INSERT INTO anagrafiche (tipo, denominazione, codice_fiscale)"
                 " VALUES ('SOCIO_CALCIATORE', ?, ?)",
-                (str(nome), str(cf)),
+                [str(nome), str(cf)],
             )
             anag_id = int(cursor.lastrowid)
 
@@ -399,20 +399,20 @@ elif menu == "Soci, Atleti & Dirigenza":
                 "INSERT INTO tesserati_calcio (anagrafica_id, matricola_figc,"
                 " categoria, ruolo, data_tesseramento, quota_stagionale) VALUES"
                 " (?, ?, ?, ?, strftime('%Y-%m-%d', 'now'), ?)",
-                (
+                [
                     anag_id,
                     str(matricola),
                     str(categoria),
                     str(ruolo),
                     float(quota),
-                ),
+                ],
             )
 
             cursor.execute(
                 "INSERT INTO certificati_medici (anagrafica_id, tipo,"
                 " data_rilascio, data_scadenza, medico_certificatore,"
                 " stato_idoneita) VALUES (?, 'AGONISTICO', ?, ?, ?, 'IDONEO')",
-                (anag_id, str(data_ril), str(data_scad), str(medico)),
+                [anag_id, str(data_ril), str(data_scad), str(medico)],
             )
 
             conn.commit()
@@ -503,7 +503,7 @@ elif menu == "Soci, Atleti & Dirigenza":
                 cursor.execute(
                     "INSERT INTO anagrafiche (tipo, denominazione,"
                     " codice_fiscale) VALUES ('SOCIO_CALCIATORE', ?, ?)",
-                    (nome, cf),
+                    [nome, cf],
                 )
                 anag_id = int(cursor.lastrowid)
 
@@ -512,7 +512,7 @@ elif menu == "Soci, Atleti & Dirigenza":
                     " matricola_figc, categoria, ruolo, data_tesseramento,"
                     " quota_stagionale) VALUES (?, ?, ?, ?, strftime('%Y-%m-%d',"
                     " 'now'), ?)",
-                    (anag_id, matricola, categoria, ruolo, quota_stag),
+                    [anag_id, matricola, categoria, ruolo, quota_stag],
                 )
 
                 if scad_medica and scad_medica.lower() != "nan":
@@ -525,7 +525,7 @@ elif menu == "Soci, Atleti & Dirigenza":
                       "INSERT INTO certificati_medici (anagrafica_id, tipo,"
                       " data_rilascio, data_scadenza, stato_idoneita) VALUES (?,"
                       " 'AGONISTICO', ?, ?, 'IDONEO')",
-                      (anag_id, rilascio, scad_medica),
+                      [anag_id, rilascio, scad_medica],
                   )
 
                 count += 1
@@ -563,21 +563,21 @@ elif menu == "Soci, Atleti & Dirigenza":
       cursor = conn.cursor()
       cursor.execute(
           "SELECT denominazione, codice_fiscale FROM anagrafiche WHERE id = ?",
-          (selected_anag_id,),
+          [selected_anag_id],
       )
       anag_row = cursor.fetchone()
 
       cursor.execute(
           "SELECT matricola_figc, categoria, ruolo, quota_stagionale, stato"
           " FROM tesserati_calcio WHERE anagrafica_id = ?",
-          (selected_anag_id,),
+          [selected_anag_id],
       )
       tess_row = cursor.fetchone()
 
       cursor.execute(
           "SELECT data_rilascio, data_scadenza, medico_certificatore FROM"
           " certificati_medici WHERE anagrafica_id = ?",
-          (selected_anag_id,),
+          [selected_anag_id],
       )
       cert_row = cursor.fetchone()
 
@@ -665,26 +665,26 @@ elif menu == "Soci, Atleti & Dirigenza":
           cursor.execute(
               "UPDATE anagrafiche SET denominazione = ?, codice_fiscale = ?"
               " WHERE id = ?",
-              (str(e_nome).strip(), str(e_cf).strip(), selected_anag_id),
+              [str(e_nome).strip(), str(e_cf).strip(), selected_anag_id],
           )
 
           cursor.execute(
               "SELECT id FROM tesserati_calcio WHERE anagrafica_id = ?",
-              (selected_anag_id,),
+              [selected_anag_id],
           )
           if cursor.fetchone():
             cursor.execute(
                 "UPDATE tesserati_calcio SET matricola_figc = ?, categoria = ?,"
                 " ruolo = ?, quota_stagionale = ?, stato = ? WHERE"
                 " anagrafica_id = ?",
-                (
+                [
                     str(e_matricola).strip(),
                     str(e_categoria),
                     str(e_ruolo),
                     float(e_quota),
                     str(e_stato),
                     selected_anag_id,
-                ),
+                ],
             )
           else:
             cursor.execute(
@@ -692,43 +692,43 @@ elif menu == "Soci, Atleti & Dirigenza":
                 " categoria, ruolo, data_tesseramento, quota_stagionale,"
                 " stato) VALUES (?, ?, ?, ?, strftime('%Y-%m-%d', 'now'), ?,"
                 " ?)",
-                (
+                [
                     selected_anag_id,
                     str(e_matricola).strip(),
                     str(e_categoria),
                     str(e_ruolo),
                     float(e_quota),
                     str(e_stato),
-                ),
+                ],
             )
 
           cursor.execute(
               "SELECT id FROM certificati_medici WHERE anagrafica_id = ?",
-              (selected_anag_id,),
+              [selected_anag_id],
           )
           if cursor.fetchone():
             cursor.execute(
                 "UPDATE certificati_medici SET data_rilascio = ?,"
                 " data_scadenza = ?, medico_certificatore = ? WHERE"
                 " anagrafica_id = ?",
-                (
+                [
                     str(e_data_ril),
                     str(e_data_scad),
                     str(e_medico).strip(),
                     selected_anag_id,
-                ),
+                ],
             )
           elif e_data_scad:
             cursor.execute(
                 "INSERT INTO certificati_medici (anagrafica_id, tipo,"
                 " data_rilascio, data_scadenza, medico_certificatore,"
                 " stato_idoneita) VALUES (?, 'AGONISTICO', ?, ?, ?, 'IDONEO')",
-                (
+                [
                     selected_anag_id,
                     str(e_data_ril),
                     str(e_data_scad),
                     str(e_medico).strip(),
-                ),
+                ],
             )
 
           conn.commit()
@@ -745,14 +745,14 @@ elif menu == "Soci, Atleti & Dirigenza":
         cursor = conn.cursor()
         cursor.execute(
             "DELETE FROM certificati_medici WHERE anagrafica_id = ?",
-            (selected_anag_id,),
+            [selected_anag_id],
         )
         cursor.execute(
             "DELETE FROM tesserati_calcio WHERE anagrafica_id = ?",
-            (selected_anag_id,),
+            [selected_anag_id],
         )
         cursor.execute(
-            "DELETE FROM anagrafiche WHERE id = ?", (selected_anag_id,)
+            "DELETE FROM anagrafiche WHERE id = ?", [selected_anag_id]
         )
         conn.commit()
         st.success("Anagrafica eliminata con successo!")
@@ -775,7 +775,7 @@ elif menu == "Ricevute Istituzionali (Art. 4)":
           cursor.execute(
               "INSERT INTO anagrafiche (tipo, denominazione, codice_fiscale,"
               " email) VALUES ('SOCIO_CALCIATORE', ?, ?, ?)",
-              (str(s_nome), str(s_cf), str(s_email)),
+              [str(s_nome), str(s_cf), str(s_email)],
           )
           conn.commit()
           st.success(f"Socio '{s_nome}' aggiunto in anagrafica!")
@@ -838,7 +838,7 @@ elif menu == "Ricevute Istituzionali (Art. 4)":
               " data_emissione, anagrafica_id, causale, importo,"
               " modalita_pagamento, marca_da_bollo) VALUES (?, ?, ?, ?, ?, ?,"
               " ?)",
-              (
+              [
                   str(num_ric),
                   str(data_ric),
                   int(soci_dict[socio_sel]),
@@ -846,14 +846,14 @@ elif menu == "Ricevute Istituzionali (Art. 4)":
                   float(importo),
                   str(pagamento),
                   float(bollo),
-              ),
+              ],
           )
 
           cursor.execute(
               "INSERT INTO movimenti_prima_nota (data_registrazione,"
               " numero_documento, causale, tipo_attivita) VALUES (?, ?, ?,"
               " 'ISTITUZIONALE')",
-              (str(data_ric), str(num_ric), f"Incasso {tipo_causale} da {socio_sel}"),
+              [str(data_ric), str(num_ric), f"Incasso {tipo_causale} da {socio_sel}"],
           )
           mov_id = int(cursor.lastrowid)
 
@@ -868,11 +868,11 @@ elif menu == "Ricevute Istituzionali (Art. 4)":
 
           cursor.execute(
               "SELECT id FROM piano_dei_conti WHERE codice = ?",
-              (cod_cassa_banca,),
+              [cod_cassa_banca],
           )
           acc_fin = int(cursor.fetchone()[0])
           cursor.execute(
-              "SELECT id FROM piano_dei_conti WHERE codice = ?", (cod_ricavo,)
+              "SELECT id FROM piano_dei_conti WHERE codice = ?", [cod_ricavo]
           )
           acc_ric = int(cursor.fetchone()[0])
 
@@ -880,13 +880,13 @@ elif menu == "Ricevute Istituzionali (Art. 4)":
               "INSERT INTO righe_prima_nota (movimento_id, sottoconto_id,"
               " descrizione, dare, avere) VALUES (?, ?, 'Incasso Quota', ?,"
               " 0.0)",
-              (mov_id, acc_fin, float(importo)),
+              [mov_id, acc_fin, float(importo)],
           )
           cursor.execute(
               "INSERT INTO righe_prima_nota (movimento_id, sottoconto_id,"
               " descrizione, dare, avere) VALUES (?, ?, 'Ricavo Istituzionale',"
               " 0.0, ?)",
-              (mov_id, acc_ric, float(importo)),
+              [mov_id, acc_ric, float(importo)],
           )
 
           conn.commit()
@@ -934,7 +934,7 @@ elif menu == "Sponsor & Pubblicità (398/98)":
             "INSERT INTO anagrafiche (tipo, denominazione, partita_iva,"
             " codice_fiscale, codice_destinatario) VALUES ('SPONSOR', ?, ?,"
             " ?, ?)",
-            (str(s_nome), str(s_piva), str(s_cf), str(s_sdi)),
+            [str(s_nome), str(s_piva), str(s_cf), str(s_sdi)],
         )
         conn.commit()
         st.success(f"Sponsor {s_nome} registrato!")
@@ -989,7 +989,7 @@ elif menu == "Sponsor & Pubblicità (398/98)":
             " sponsor_id, oggetto_contratto, imponibile, aliquota_iva,"
             " iva_totale, totale_fattura, iva_da_versare_50, stima_ires_3)"
             " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
+            [
                 str(num_fat),
                 str(data_fat),
                 int(spon_dict[spon_sel]),
@@ -1000,14 +1000,14 @@ elif menu == "Sponsor & Pubblicità (398/98)":
                 float(totale_fattura),
                 float(iva_da_versare_50),
                 float(stima_ires_3),
-            ),
+            ],
         )
 
         cursor.execute(
             "INSERT INTO movimenti_prima_nota (data_registrazione,"
             " numero_documento, causale, tipo_attivita) VALUES (?, ?, ?,"
             " 'COMMERCIALE_398')",
-            (str(data_fat), str(num_fat), f"Fattura Sponsor {spon_sel}"),
+            [str(data_fat), str(num_fat), f"Fattura Sponsor {spon_sel}"],
         )
         mov_id = int(cursor.lastrowid)
 
@@ -1028,19 +1028,19 @@ elif menu == "Sponsor & Pubblicità (398/98)":
             "INSERT INTO righe_prima_nota (movimento_id, sottoconto_id,"
             " descrizione, dare, avere) VALUES (?, ?, 'Credito v/Sponsor', ?,"
             " 0.0)",
-            (mov_id, acc_cred, float(totale_fattura)),
+            [mov_id, acc_cred, float(totale_fattura)],
         )
         cursor.execute(
             "INSERT INTO righe_prima_nota (movimento_id, sottoconto_id,"
             " descrizione, dare, avere) VALUES (?, ?, 'Ricavo Sponsor 398',"
             " 0.0, ?)",
-            (mov_id, acc_ric, float(imponibile)),
+            [mov_id, acc_ric, float(imponibile)],
         )
         cursor.execute(
             "INSERT INTO righe_prima_nota (movimento_id, sottoconto_id,"
             " descrizione, dare, avere) VALUES (?, ?, 'IVA 398/98 50%', 0.0,"
             " ?)",
-            (mov_id, acc_iva, float(iva_da_versare_50)),
+            [mov_id, acc_iva, float(iva_da_versare_50)],
         )
 
         conn.commit()
@@ -1134,7 +1134,7 @@ elif menu == "Lavoro Sportivo & Rimborsi (D.Lgs. 36)":
               " data_erogazione, causale, importo_lordo, progressivo_inps_anno,"
               " progressivo_irpef_anno, ritenuta_inps, ritenuta_irpef,"
               " importo_netto) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-              (
+              [
                   coll_id,
                   str(data_erog),
                   str(causale_c),
@@ -1144,7 +1144,7 @@ elif menu == "Lavoro Sportivo & Rimborsi (D.Lgs. 36)":
                   float(rit_inps),
                   float(rit_irpef),
                   float(importo_netto),
-              ),
+              ],
           )
 
           conn.commit()
@@ -1194,7 +1194,7 @@ elif menu == "Lavoro Sportivo & Rimborsi (D.Lgs. 36)":
             " incontro_calcio, luogo_trasferta, km_percorsi, tariffa_aci,"
             " spese_pie_di_lista, totale_rimborso) VALUES (?, ?, ?, ?, ?, ?,"
             " ?, ?)",
-            (
+            [
                 int(a_dict[atleta_sel]),
                 str(data_partita),
                 str(incontro),
@@ -1203,7 +1203,7 @@ elif menu == "Lavoro Sportivo & Rimborsi (D.Lgs. 36)":
                 float(tariffa_aci),
                 float(spese_doc),
                 float(tot_rimborso),
-            ),
+            ],
         )
         conn.commit()
         st.success("Rimborso trasferta registrato!")
@@ -1288,7 +1288,7 @@ elif menu == "Riconciliazione Estratti Conto":
                 "INSERT INTO estratti_conto_importati (fonte, data_transazione,"
                 " descrizione, importo_lordo, commissione, importo_netto,"
                 " stato_riconciliazione) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (fonte_str, d_trans, desc_t, imp_l, comm_t, imp_n, st_ric),
+                [fonte_str, d_trans, desc_t, imp_l, comm_t, imp_n, st_ric],
             )
             saved_count += 1
 
@@ -1347,7 +1347,7 @@ elif menu == "Riconciliazione Estratti Conto":
         cursor.execute(
             "UPDATE estratti_conto_importati SET stato_riconciliazione = ?"
             " WHERE id = ?",
-            (str(nuovo_stato), mov_id_sel),
+            [str(nuovo_stato), mov_id_sel],
         )
         conn.commit()
         st.success(f"Movimento ID {mov_id_sel} aggiornato a '{nuovo_stato}'!")
@@ -1359,7 +1359,7 @@ elif menu == "Riconciliazione Estratti Conto":
           cursor = conn.cursor()
           cursor.execute(
               "DELETE FROM estratti_conto_importati WHERE id = ?",
-              (mov_id_sel,),
+              [mov_id_sel],
           )
           conn.commit()
           st.success("Movimento eliminato dal database!")
@@ -1396,14 +1396,14 @@ elif menu == "Riconciliazione Estratti Conto":
               " descrizione, importo_lordo, commissione, importo_netto,"
               " stato_riconciliazione) VALUES (?, ?, ?, ?, ?, ?,"
               " 'DA_RICONCILIARE')",
-              (
+              [
                   str(m_fonte),
                   str(m_data),
                   str(m_desc),
                   float(m_lordo),
                   float(m_comm),
                   float(m_netto),
-              ),
+              ],
           )
           conn.commit()
           st.success("Movimento salvato con successo nel database!")
@@ -1479,30 +1479,30 @@ elif menu == "Prima Nota & Rendiconto ASD":
             cursor.execute(
                 "INSERT INTO movimenti_prima_nota (data_registrazione,"
                 " numero_documento, causale, tipo_attivita) VALUES (?, ?, ?, ?)",
-                (str(data_reg), str(num_doc), str(causale), str(tipo_att)),
+                [str(data_reg), str(num_doc), str(causale), str(tipo_att)],
             )
             mov_id = int(cursor.lastrowid)
 
             cursor.execute(
                 "INSERT INTO righe_prima_nota (movimento_id, sottoconto_id,"
                 " descrizione, dare, avere) VALUES (?, ?, ?, ?, 0.00)",
-                (
+                [
                     mov_id,
                     int(pdc_dict[conto_dare]),
                     str(causale),
                     float(importo_dare),
-                ),
+                ],
             )
 
             cursor.execute(
                 "INSERT INTO righe_prima_nota (movimento_id, sottoconto_id,"
                 " descrizione, dare, avere) VALUES (?, ?, ?, 0.00, ?)",
-                (
+                [
                     mov_id,
                     int(pdc_dict[conto_avere]),
                     str(causale),
                     float(importo_avere),
-                ),
+                ],
             )
 
             conn.commit()
