@@ -541,8 +541,8 @@ elif menu == "Soci, Atleti & Dirigenza":
             conn = get_ro_conn()
             try:
                 df_a = pd.read_sql_query("SELECT denominazione, codice_fiscale FROM anagrafiche WHERE id = ?", conn, params=[selected_anag_id])
-                df_t = pd.read_sql_query("SELECT id, matricola_figc, categoria, ruolo, quota_stagionale, stato FROM tesserati_calcio WHERE anagrafica_id = ? ORDER BY id DESC LIMIT 1", conn, params=[selected_anag_id])
-                df_c = pd.read_sql_query("SELECT id, data_rilascio, data_scadenza, medico_certificatore FROM certificati_medici WHERE anagrafica_id = ? ORDER BY id DESC LIMIT 1", conn, params=[selected_anag_id])
+                df_t = pd.read_sql_query("SELECT matricola_figc, categoria, ruolo, quota_stagionale, stato FROM tesserati_calcio WHERE anagrafica_id = ?", conn, params=[selected_anag_id])
+                df_c = pd.read_sql_query("SELECT data_rilascio, data_scadenza, medico_certificatore FROM certificati_medici WHERE anagrafica_id = ?", conn, params=[selected_anag_id])
             finally:
                 conn.close()
 
@@ -603,33 +603,31 @@ elif menu == "Soci, Atleti & Dirigenza":
                     with db_write() as w_cur:
                         w_cur.execute(
                             "UPDATE anagrafiche SET denominazione = ?, codice_fiscale = ? WHERE id = ?",
-                            (str(e_nome).strip(), str(e_cf).strip(), selected_anag_id)
+                            (str(e_nome).strip(), str(e_cf).strip(), int(selected_anag_id))
                         )
 
                         if has_tess:
-                            t_id = int(df_t["id"].iloc[0])
                             w_cur.execute(
-                                "UPDATE tesserati_calcio SET matricola_figc = ?, categoria = ?, ruolo = ?, quota_stagionale = ?, stato = ? WHERE id = ?",
-                                (str(e_matricola).strip(), str(e_categoria), str(e_ruolo), float(e_quota), str(e_stato), t_id)
+                                "UPDATE tesserati_calcio SET matricola_figc = ?, categoria = ?, ruolo = ?, quota_stagionale = ?, stato = ? WHERE anagrafica_id = ?",
+                                (str(e_matricola).strip(), str(e_categoria), str(e_ruolo), float(e_quota), str(e_stato), int(selected_anag_id))
                             )
                         else:
                             w_cur.execute(
                                 "INSERT INTO tesserati_calcio (anagrafica_id, matricola_figc, categoria, ruolo, data_tesseramento, quota_stagionale, stato) "
                                 "VALUES (?, ?, ?, ?, strftime('%Y-%m-%d', 'now'), ?, ?)",
-                                (selected_anag_id, str(e_matricola).strip(), str(e_categoria), str(e_ruolo), float(e_quota), str(e_stato))
+                                (int(selected_anag_id), str(e_matricola).strip(), str(e_categoria), str(e_ruolo), float(e_quota), str(e_stato))
                             )
 
                         if has_cert:
-                            c_id = int(df_c["id"].iloc[0])
                             w_cur.execute(
-                                "UPDATE certificati_medici SET data_rilascio = ?, data_scadenza = ?, medico_certificatore = ? WHERE id = ?",
-                                (str(e_data_ril), str(e_data_scad), str(e_medico).strip(), c_id)
+                                "UPDATE certificati_medici SET data_rilascio = ?, data_scadenza = ?, medico_certificatore = ? WHERE anagrafica_id = ?",
+                                (str(e_data_ril), str(e_data_scad), str(e_medico).strip(), int(selected_anag_id))
                             )
                         elif e_data_scad:
                             w_cur.execute(
                                 "INSERT INTO certificati_medici (anagrafica_id, tipo, data_rilascio, data_scadenza, medico_certificatore, stato_idoneita) "
                                 "VALUES (?, 'AGONISTICO', ?, ?, ?, 'IDONEO')",
-                                (selected_anag_id, str(e_data_ril), str(e_data_scad), str(e_medico).strip())
+                                (int(selected_anag_id), str(e_data_ril), str(e_data_scad), str(e_medico).strip())
                             )
 
                     st.session_state["flash"] = f"Scheda di '{e_nome}' aggiornata con successo!"
