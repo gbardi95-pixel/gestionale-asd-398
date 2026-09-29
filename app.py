@@ -387,6 +387,10 @@ elif menu == "Soci, Atleti & Dirigenza":
 
         if st.form_submit_button("Salva in Anagrafica"):
           if nome:
+            try:
+              conn.commit()
+            except Exception:
+              pass
             cursor = conn.cursor()
             cursor.execute(
                 "INSERT INTO anagrafiche (tipo, denominazione, codice_fiscale)"
@@ -458,6 +462,10 @@ elif menu == "Soci, Atleti & Dirigenza":
           st.dataframe(df_import.head(10), use_container_width=True)
 
           if st.button("🚀 Conferma Importazione Dati nel Database"):
+            try:
+              conn.commit()
+            except Exception:
+              pass
             cursor = conn.cursor()
             count = 0
 
@@ -560,7 +568,6 @@ elif menu == "Soci, Atleti & Dirigenza":
       )
       selected_anag_id = int(people_dict[selected_label])
 
-      # Lettura isolata e sicura tramite DataFrame per evitare conflitti di cursore
       df_a = pd.read_sql_query(
           "SELECT denominazione, codice_fiscale FROM anagrafiche WHERE id = ?",
           conn,
@@ -578,6 +585,12 @@ elif menu == "Soci, Atleti & Dirigenza":
           conn,
           params=[selected_anag_id],
       )
+
+      # Rilascia la transazione di lettura aperta da pd.read_sql_query
+      try:
+        conn.commit()
+      except Exception:
+        pass
 
       cur_nome = (
           str(df_a["denominazione"].iloc[0])
@@ -700,6 +713,12 @@ elif menu == "Soci, Atleti & Dirigenza":
         e_medico = m_col3.text_input("Medico Certificatore", value=cur_medico)
 
         if st.form_submit_button("💾 Salva Modifiche Scheda"):
+          # Sblocco preventivo connessione Turso
+          try:
+            conn.commit()
+          except Exception:
+            pass
+
           c = conn.cursor()
 
           c.execute(
@@ -774,6 +793,10 @@ elif menu == "Soci, Atleti & Dirigenza":
           " e i suoi dati associati."
       )
       if st.button("❌ Conferma Eliminazione Definitiva Persona"):
+        try:
+          conn.commit()
+        except Exception:
+          pass
         c = conn.cursor()
         c.execute(
             "DELETE FROM certificati_medici WHERE anagrafica_id = ?",
@@ -801,6 +824,10 @@ elif menu == "Ricevute Istituzionali (Art. 4)":
       s_email = st.text_input("Email / Telefono")
       if st.form_submit_button("Salva Socio"):
         if s_nome:
+          try:
+            conn.commit()
+          except Exception:
+            pass
           cursor = conn.cursor()
           cursor.execute(
               "INSERT INTO anagrafiche (tipo, denominazione, codice_fiscale,"
@@ -886,6 +913,11 @@ elif menu == "Ricevute Istituzionali (Art. 4)":
               )["id"].iloc[0]
           )
 
+          try:
+            conn.commit()
+          except Exception:
+            pass
+
           cursor = conn.cursor()
           cursor.execute(
               "INSERT INTO ricevute_istituzionali (numero_ricevuta,"
@@ -964,6 +996,10 @@ elif menu == "Sponsor & Pubblicità (398/98)":
       s_cf = st.text_input("Codice Fiscale")
       s_sdi = st.text_input("Codice Destinatario SDI", value="0000000")
       if st.form_submit_button("Salva Sponsor"):
+        try:
+          conn.commit()
+        except Exception:
+          pass
         cursor = conn.cursor()
         cursor.execute(
             "INSERT INTO anagrafiche (tipo, denominazione, partita_iva,"
@@ -1033,6 +1069,11 @@ elif menu == "Sponsor & Pubblicità (398/98)":
                 "SELECT id FROM piano_dei_conti WHERE codice = '20.02.001'", conn
             )["id"].iloc[0]
         )
+
+        try:
+          conn.commit()
+        except Exception:
+          pass
 
         cursor = conn.cursor()
         cursor.execute(
@@ -1150,7 +1191,6 @@ elif menu == "Lavoro Sportivo & Rimborsi (D.Lgs. 36)":
 
       if st.form_submit_button("Eroga Compenso e Calcola Franchigie"):
         if staff_sel:
-          cursor = conn.cursor()
           coll_id = int(staff_dict[staff_sel])
           prog_inps = (
               pd.read_sql_query(
@@ -1161,6 +1201,12 @@ elif menu == "Lavoro Sportivo & Rimborsi (D.Lgs. 36)":
               + importo_lordo
           )
 
+          try:
+            conn.commit()
+          except Exception:
+            pass
+
+          cursor = conn.cursor()
           rit_inps = (
               (prog_inps - 5000.0) * 0.25 * 0.50 if prog_inps > 5000.0 else 0.0
           )
@@ -1226,6 +1272,10 @@ elif menu == "Lavoro Sportivo & Rimborsi (D.Lgs. 36)":
       )
 
       if st.form_submit_button("Registra Distinta Rimborso Trasferta"):
+        try:
+          conn.commit()
+        except Exception:
+          pass
         cursor = conn.cursor()
         cursor.execute(
             "INSERT INTO rimborsi_trasferta (anagrafica_id, data_partita,"
@@ -1310,6 +1360,10 @@ elif menu == "Riconciliazione Estratti Conto":
 
         col_save, _ = st.columns([2, 1])
         if col_save.button("💾 Salva e Importa Movimenti nel Database"):
+          try:
+            conn.commit()
+          except Exception:
+            pass
           cursor = conn.cursor()
           saved_count = 0
           fonte_str = "PAYPAL" if "PayPal" in tipo_fonte else "BANCA"
@@ -1381,6 +1435,10 @@ elif menu == "Riconciliazione Estratti Conto":
 
       if c_m3.button("Aggiorna Stato"):
         mov_id_sel = int(mov_dict[mov_sel])
+        try:
+          conn.commit()
+        except Exception:
+          pass
         cursor = conn.cursor()
         cursor.execute(
             "UPDATE estratti_conto_importati SET stato_riconciliazione = ?"
@@ -1394,6 +1452,10 @@ elif menu == "Riconciliazione Estratti Conto":
       with st.expander("🗑️ Elimina Movimento Selezionato"):
         if st.button("Conferma Eliminazione Record"):
           mov_id_sel = int(mov_dict[mov_sel])
+          try:
+            conn.commit()
+          except Exception:
+            pass
           cursor = conn.cursor()
           cursor.execute(
               "DELETE FROM estratti_conto_importati WHERE id = ?",
@@ -1428,6 +1490,10 @@ elif menu == "Riconciliazione Estratti Conto":
       if st.form_submit_button("Salva Movimento nel Database"):
         if m_desc and m_lordo != 0.0:
           m_netto = float(m_lordo) - float(m_comm)
+          try:
+            conn.commit()
+          except Exception:
+            pass
           cursor = conn.cursor()
           cursor.execute(
               "INSERT INTO estratti_conto_importati (fonte, data_transazione,"
@@ -1513,6 +1579,10 @@ elif menu == "Prima Nota & Rendiconto ASD":
 
         if st.form_submit_button("Salva Scrittura in Prima Nota"):
           if importo_dare > 0 and importo_dare == importo_avere:
+            try:
+              conn.commit()
+            except Exception:
+              pass
             cursor = conn.cursor()
             cursor.execute(
                 "INSERT INTO movimenti_prima_nota (data_registrazione,"
@@ -1595,6 +1665,10 @@ elif menu == "Piano dei Conti ASD":
   st.subheader("🌳 Struttura del Piano dei Conti ASD (Legge 398/98)")
 
   if st.button("🔄 Ripopola Piano dei Conti Predefinito"):
+    try:
+      conn.commit()
+    except Exception:
+      pass
     cursor = conn.cursor()
     cursor.execute("DELETE FROM piano_dei_conti;")
     cursor.executemany(
