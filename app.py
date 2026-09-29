@@ -387,43 +387,45 @@ elif menu == "Soci, Atleti & Dirigenza":
 
         if st.form_submit_button("Salva in Anagrafica"):
           if nome:
-            try:
-              conn.commit()
-            except Exception:
-              pass
+            w_conn = get_connection()
+            w_cur = w_conn.cursor()
 
-            cursor = conn.cursor()
-            cursor.execute(
+            w_cur.execute(
                 "INSERT INTO anagrafiche (tipo, denominazione, codice_fiscale)"
-                " VALUES ('SOCIO_CALCIATORE', ?, ?)",
-                (str(nome).strip(), str(cf).strip()),
+                " VALUES ('SOCIO_CALCIATORE', :nome, :cf)",
+                {"nome": str(nome).strip(), "cf": str(cf).strip()},
             )
-            
-            res = pd.read_sql_query("SELECT MAX(id) as last_id FROM anagrafiche", conn)
-            anag_id = int(res["last_id"].iloc[0])
+            anag_id = int(w_cur.lastrowid)
 
-            cursor.execute(
+            w_cur.execute(
                 "INSERT INTO tesserati_calcio (anagrafica_id, matricola_figc,"
                 " categoria, ruolo, data_tesseramento, quota_stagionale) VALUES"
-                " (?, ?, ?, ?, strftime('%Y-%m-%d', 'now'), ?)",
-                (
-                    anag_id,
-                    str(matricola).strip(),
-                    str(categoria),
-                    str(ruolo),
-                    float(quota),
-                ),
+                " (:id, :matricola, :cat, :ruolo, strftime('%Y-%m-%d', 'now'),"
+                " :quota)",
+                {
+                    "id": anag_id,
+                    "matricola": str(matricola).strip(),
+                    "cat": str(categoria),
+                    "ruolo": str(ruolo),
+                    "quota": float(quota),
+                },
             )
 
-            cursor.execute(
+            w_cur.execute(
                 "INSERT INTO certificati_medici (anagrafica_id, tipo,"
                 " data_rilascio, data_scadenza, medico_certificatore,"
-                " stato_idoneita) VALUES (?, 'AGONISTICO', ?, ?, ?, 'IDONEO')",
-                (anag_id, str(data_ril), str(data_scad), str(medico).strip()),
+                " stato_idoneita) VALUES (:id, 'AGONISTICO', :data_ril,"
+                " :data_scad, :medico, 'IDONEO')",
+                {
+                    "id": anag_id,
+                    "data_ril": str(data_ril),
+                    "data_scad": str(data_scad),
+                    "medico": str(medico).strip(),
+                },
             )
 
-            conn.commit()
-            cursor.close()
+            w_conn.commit()
+            w_conn.close()
             st.success(f"{nome} salvato con successo in anagrafica!")
             st.rerun()
 
@@ -466,12 +468,8 @@ elif menu == "Soci, Atleti & Dirigenza":
           st.dataframe(df_import.head(10), use_container_width=True)
 
           if st.button("🚀 Conferma Importazione Dati nel Database"):
-            try:
-              conn.commit()
-            except Exception:
-              pass
-            
-            cursor = conn.cursor()
+            w_conn = get_connection()
+            w_cur = w_conn.cursor()
             count = 0
 
             for _, row in df_import.iterrows():
@@ -515,20 +513,25 @@ elif menu == "Soci, Atleti & Dirigenza":
               )
 
               if nome and nome.lower() != "nan":
-                cursor.execute(
+                w_cur.execute(
                     "INSERT INTO anagrafiche (tipo, denominazione,"
-                    " codice_fiscale) VALUES ('SOCIO_CALCIATORE', ?, ?)",
-                    (nome, cf),
+                    " codice_fiscale) VALUES ('SOCIO_CALCIATORE', :nome, :cf)",
+                    {"nome": nome, "cf": cf},
                 )
-                res = pd.read_sql_query("SELECT MAX(id) as last_id FROM anagrafiche", conn)
-                anag_id = int(res["last_id"].iloc[0])
+                anag_id = int(w_cur.lastrowid)
 
-                cursor.execute(
+                w_cur.execute(
                     "INSERT INTO tesserati_calcio (anagrafica_id,"
                     " matricola_figc, categoria, ruolo, data_tesseramento,"
-                    " quota_stagionale) VALUES (?, ?, ?, ?, strftime('%Y-%m-%d',"
-                    " 'now'), ?)",
-                    (anag_id, matricola, categoria, ruolo, quota_stag),
+                    " quota_stagionale) VALUES (:id, :matricola, :cat, :ruolo,"
+                    " strftime('%Y-%m-%d', 'now'), :quota)",
+                    {
+                        "id": anag_id,
+                        "matricola": matricola,
+                        "cat": categoria,
+                        "ruolo": ruolo,
+                        "quota": quota_stag,
+                    },
                 )
 
                 if scad_medica and scad_medica.lower() != "nan":
@@ -537,17 +540,21 @@ elif menu == "Soci, Atleti & Dirigenza":
                       if (data_ril and data_ril.lower() != "nan")
                       else "2026-01-01"
                   )
-                  cursor.execute(
+                  w_cur.execute(
                       "INSERT INTO certificati_medici (anagrafica_id, tipo,"
-                      " data_rilascio, data_scadenza, stato_idoneita) VALUES (?,"
-                      " 'AGONISTICO', ?, ?, 'IDONEO')",
-                      (anag_id, rilascio, scad_medica),
+                      " data_rilascio, data_scadenza, stato_idoneita) VALUES"
+                      " (:id, 'AGONISTICO', :data_ril, :data_scad, 'IDONEO')",
+                      {
+                          "id": anag_id,
+                          "data_ril": rilascio,
+                          "data_scad": scad_medica,
+                      },
                   )
 
                 count += 1
 
-            conn.commit()
-            cursor.close()
+            w_conn.commit()
+            w_conn.close()
             st.success(
                 f"✅ Importazione completata! Inseriti {count} record nel DB."
             )
@@ -578,27 +585,22 @@ elif menu == "Soci, Atleti & Dirigenza":
       selected_anag_id = int(people_dict[selected_label])
 
       df_a = pd.read_sql_query(
-          "SELECT denominazione, codice_fiscale FROM anagrafiche WHERE id = ?",
+          "SELECT denominazione, codice_fiscale FROM anagrafiche WHERE id = :id",
           conn,
-          params=[selected_anag_id],
+          params={"id": selected_anag_id},
       )
       df_t = pd.read_sql_query(
           "SELECT matricola_figc, categoria, ruolo, quota_stagionale, stato"
-          " FROM tesserati_calcio WHERE anagrafica_id = ?",
+          " FROM tesserati_calcio WHERE anagrafica_id = :id",
           conn,
-          params=[selected_anag_id],
+          params={"id": selected_anag_id},
       )
       df_c = pd.read_sql_query(
           "SELECT data_rilascio, data_scadenza, medico_certificatore FROM"
-          " certificati_medici WHERE anagrafica_id = ?",
+          " certificati_medici WHERE anagrafica_id = :id",
           conn,
-          params=[selected_anag_id],
+          params={"id": selected_anag_id},
       )
-
-      try:
-        conn.commit()
-      except Exception:
-        pass
 
       cur_nome = (
           str(df_a["denominazione"].iloc[0])
@@ -721,76 +723,77 @@ elif menu == "Soci, Atleti & Dirigenza":
         e_medico = m_col3.text_input("Medico Certificatore", value=cur_medico)
 
         if st.form_submit_button("💾 Salva Modifiche Scheda"):
-          try:
-            conn.commit()
-          except Exception:
-            pass
+          w_conn = get_connection()
+          w_cur = w_conn.cursor()
 
-          cursor = conn.cursor()
-
-          cursor.execute(
-              "UPDATE anagrafiche SET denominazione = ?, codice_fiscale = ?"
-              " WHERE id = ?",
-              (str(e_nome).strip(), str(e_cf).strip(), int(selected_anag_id)),
+          w_cur.execute(
+              "UPDATE anagrafiche SET denominazione = :nome, codice_fiscale = :cf"
+              " WHERE id = :id",
+              {
+                  "nome": str(e_nome).strip(),
+                  "cf": str(e_cf).strip(),
+                  "id": int(selected_anag_id),
+              },
           )
 
           if has_tess:
-            cursor.execute(
-                "UPDATE tesserati_calcio SET matricola_figc = ?, categoria = ?,"
-                " ruolo = ?, quota_stagionale = ?, stato = ? WHERE"
-                " anagrafica_id = ?",
-                (
-                    str(e_matricola).strip(),
-                    str(e_categoria),
-                    str(e_ruolo),
-                    float(e_quota),
-                    str(e_stato),
-                    int(selected_anag_id),
-                ),
+            w_cur.execute(
+                "UPDATE tesserati_calcio SET matricola_figc = :matricola,"
+                " categoria = :cat, ruolo = :ruolo, quota_stagionale = :quota,"
+                " stato = :stato WHERE anagrafica_id = :id",
+                {
+                    "matricola": str(e_matricola).strip(),
+                    "cat": str(e_categoria),
+                    "ruolo": str(e_ruolo),
+                    "quota": float(e_quota),
+                    "stato": str(e_stato),
+                    "id": int(selected_anag_id),
+                },
             )
           else:
-            cursor.execute(
+            w_cur.execute(
                 "INSERT INTO tesserati_calcio (anagrafica_id, matricola_figc,"
                 " categoria, ruolo, data_tesseramento, quota_stagionale,"
-                " stato) VALUES (?, ?, ?, ?, strftime('%Y-%m-%d', 'now'), ?,"
-                " ?)",
-                (
-                    int(selected_anag_id),
-                    str(e_matricola).strip(),
-                    str(e_categoria),
-                    str(e_ruolo),
-                    float(e_quota),
-                    str(e_stato),
-                ),
+                " stato) VALUES (:id, :matricola, :cat, :ruolo,"
+                " strftime('%Y-%m-%d', 'now'), :quota, :stato)",
+                {
+                    "id": int(selected_anag_id),
+                    "matricola": str(e_matricola).strip(),
+                    "cat": str(e_categoria),
+                    "ruolo": str(e_ruolo),
+                    "quota": float(e_quota),
+                    "stato": str(e_stato),
+                },
             )
 
           if has_cert:
-            cursor.execute(
-                "UPDATE certificati_medici SET data_rilascio = ?,"
-                " data_scadenza = ?, medico_certificatore = ? WHERE"
-                " anagrafica_id = ?",
-                (
-                    str(e_data_ril),
-                    str(e_data_scad),
-                    str(e_medico).strip(),
-                    int(selected_anag_id),
-                ),
+            w_cur.execute(
+                "UPDATE certificati_medici SET data_rilascio = :data_ril,"
+                " data_scadenza = :data_scad, medico_certificatore = :medico"
+                " WHERE anagrafica_id = :id",
+                {
+                    "data_ril": str(e_data_ril),
+                    "data_scad": str(e_data_scad),
+                    "medico": str(e_medico).strip(),
+                    "id": int(selected_anag_id),
+                },
             )
           elif e_data_scad:
-            cursor.execute(
+            w_cur.execute(
                 "INSERT INTO certificati_medici (anagrafica_id, tipo,"
                 " data_rilascio, data_scadenza, medico_certificatore,"
-                " stato_idoneita) VALUES (?, 'AGONISTICO', ?, ?, ?, 'IDONEO')",
-                (
-                    int(selected_anag_id),
-                    str(e_data_ril),
-                    str(e_data_scad),
-                    str(e_medico).strip(),
-                ),
+                " stato_idoneita) VALUES (:id, 'AGONISTICO', :data_ril,"
+                " :data_scad, :medico, 'IDONEO')",
+                {
+                    "id": int(selected_anag_id),
+                    "data_ril": str(e_data_ril),
+                    "data_scad": str(e_data_scad),
+                    "medico": str(e_medico).strip(),
+                },
             )
 
-          conn.commit()
-          cursor.close()
+          w_conn.commit()
+          w_conn.close()
           st.success(f"Scheda di {e_nome} salvata e aggiornata con successo!")
           st.rerun()
 
@@ -801,26 +804,22 @@ elif menu == "Soci, Atleti & Dirigenza":
           " e i suoi dati associati."
       )
       if st.button("❌ Conferma Eliminazione Definitiva Persona"):
-        try:
-          conn.commit()
-        except Exception:
-          pass
-
-        cursor = conn.cursor()
-        cursor.execute(
-            "DELETE FROM certificati_medici WHERE anagrafica_id = ?",
-            (int(selected_anag_id),),
+        w_conn = get_connection()
+        w_cur = w_conn.cursor()
+        w_cur.execute(
+            "DELETE FROM certificati_medici WHERE anagrafica_id = :id",
+            {"id": int(selected_anag_id)},
         )
-        cursor.execute(
-            "DELETE FROM tesserati_calcio WHERE anagrafica_id = ?",
-            (int(selected_anag_id),),
+        w_cur.execute(
+            "DELETE FROM tesserati_calcio WHERE anagrafica_id = :id",
+            {"id": int(selected_anag_id)},
         )
-        cursor.execute(
-            "DELETE FROM anagrafiche WHERE id = ?",
-            (int(selected_anag_id),),
+        w_cur.execute(
+            "DELETE FROM anagrafiche WHERE id = :id",
+            {"id": int(selected_anag_id)},
         )
-        conn.commit()
-        cursor.close()
+        w_conn.commit()
+        w_conn.close()
         st.success("Anagrafica eliminata con successo!")
         st.rerun()
 
@@ -837,19 +836,19 @@ elif menu == "Ricevute Istituzionali (Art. 4)":
       s_email = st.text_input("Email / Telefono")
       if st.form_submit_button("Salva Socio"):
         if s_nome:
-          try:
-            conn.commit()
-          except Exception:
-            pass
-
-          cursor = conn.cursor()
-          cursor.execute(
+          w_conn = get_connection()
+          w_cur = w_conn.cursor()
+          w_cur.execute(
               "INSERT INTO anagrafiche (tipo, denominazione, codice_fiscale,"
-              " email) VALUES ('SOCIO_CALCIATORE', ?, ?, ?)",
-              (str(s_nome).strip(), str(s_cf).strip(), str(s_email).strip()),
+              " email) VALUES ('SOCIO_CALCIATORE', :nome, :cf, :email)",
+              {
+                  "nome": str(s_nome).strip(),
+                  "cf": str(s_cf).strip(),
+                  "email": str(s_email).strip(),
+              },
           )
-          conn.commit()
-          cursor.close()
+          w_conn.commit()
+          w_conn.close()
           st.success(f"Socio '{s_nome}' aggiunto in anagrafica!")
           st.rerun()
 
@@ -915,66 +914,64 @@ elif menu == "Ricevute Istituzionali (Art. 4)":
 
           acc_fin = int(
               pd.read_sql_query(
-                  "SELECT id FROM piano_dei_conti WHERE codice = ?",
+                  "SELECT id FROM piano_dei_conti WHERE codice = :cod",
                   conn,
-                  params=[cod_cassa_banca],
+                  params={"cod": cod_cassa_banca},
               )["id"].iloc[0]
           )
           acc_ric = int(
               pd.read_sql_query(
-                  "SELECT id FROM piano_dei_conti WHERE codice = ?",
+                  "SELECT id FROM piano_dei_conti WHERE codice = :cod",
                   conn,
-                  params=[cod_ricavo],
+                  params={"cod": cod_ricavo},
               )["id"].iloc[0]
           )
 
-          try:
-            conn.commit()
-          except Exception:
-            pass
-
-          cursor = conn.cursor()
-          cursor.execute(
+          w_conn = get_connection()
+          w_cur = w_conn.cursor()
+          w_cur.execute(
               "INSERT INTO ricevute_istituzionali (numero_ricevuta,"
               " data_emissione, anagrafica_id, causale, importo,"
-              " modalita_pagamento, marca_da_bollo) VALUES (?, ?, ?, ?, ?, ?,"
-              " ?)",
-              (
-                  str(num_ric).strip(),
-                  str(data_ric),
-                  int(soci_dict[socio_sel]),
-                  str(causale_completa).strip(),
-                  float(importo),
-                  str(pagamento),
-                  float(bollo),
-              ),
+              " modalita_pagamento, marca_da_bollo) VALUES (:num, :data, :anag,"
+              " :causale, :imp, :pag, :bollo)",
+              {
+                  "num": str(num_ric).strip(),
+                  "data": str(data_ric),
+                  "anag": int(soci_dict[socio_sel]),
+                  "causale": str(causale_completa).strip(),
+                  "imp": float(importo),
+                  "pag": str(pagamento),
+                  "bollo": float(bollo),
+              },
           )
 
-          cursor.execute(
+          w_cur.execute(
               "INSERT INTO movimenti_prima_nota (data_registrazione,"
-              " numero_documento, causale, tipo_attivita) VALUES (?, ?, ?,"
-              " 'ISTITUZIONALE')",
-              (str(data_ric), str(num_ric).strip(), f"Incasso {tipo_causale} da {socio_sel}"),
+              " numero_documento, causale, tipo_attivita) VALUES (:data, :num,"
+              " :causale, 'ISTITUZIONALE')",
+              {
+                  "data": str(data_ric),
+                  "num": str(num_ric).strip(),
+                  "causale": f"Incasso {tipo_causale} da {socio_sel}",
+              },
           )
-          
-          res = pd.read_sql_query("SELECT MAX(id) as last_id FROM movimenti_prima_nota", conn)
-          mov_id = int(res["last_id"].iloc[0])
+          mov_id = int(w_cur.lastrowid)
 
-          cursor.execute(
+          w_cur.execute(
               "INSERT INTO righe_prima_nota (movimento_id, sottoconto_id,"
-              " descrizione, dare, avere) VALUES (?, ?, 'Incasso Quota', ?,"
-              " 0.0)",
-              (mov_id, acc_fin, float(importo)),
+              " descrizione, dare, avere) VALUES (:mov_id, :acc,"
+              " 'Incasso Quota', :imp, 0.0)",
+              {"mov_id": mov_id, "acc": acc_fin, "imp": float(importo)},
           )
-          cursor.execute(
+          w_cur.execute(
               "INSERT INTO righe_prima_nota (movimento_id, sottoconto_id,"
-              " descrizione, dare, avere) VALUES (?, ?, 'Ricavo Istituzionale',"
-              " 0.0, ?)",
-              (mov_id, acc_ric, float(importo)),
+              " descrizione, dare, avere) VALUES (:mov_id, :acc, 'Ricavo"
+              " Istituzionale', 0.0, :imp)",
+              {"mov_id": mov_id, "acc": acc_ric, "imp": float(importo)},
           )
 
-          conn.commit()
-          cursor.close()
+          w_conn.commit()
+          w_conn.close()
           st.success(
               f"Ricevuta N. {num_ric} emessa per {socio_sel} e contabilizzata!"
           )
@@ -1014,20 +1011,21 @@ elif menu == "Sponsor & Pubblicità (398/98)":
       s_cf = st.text_input("Codice Fiscale")
       s_sdi = st.text_input("Codice Destinatario SDI", value="0000000")
       if st.form_submit_button("Salva Sponsor"):
-        try:
-          conn.commit()
-        except Exception:
-          pass
-
-        cursor = conn.cursor()
-        cursor.execute(
+        w_conn = get_connection()
+        w_cur = w_conn.cursor()
+        w_cur.execute(
             "INSERT INTO anagrafiche (tipo, denominazione, partita_iva,"
-            " codice_fiscale, codice_destinatario) VALUES ('SPONSOR', ?, ?,"
-            " ?, ?)",
-            (str(s_nome).strip(), str(s_piva).strip(), str(s_cf).strip(), str(s_sdi).strip()),
+            " codice_fiscale, codice_destinatario) VALUES ('SPONSOR', :nome,"
+            " :piva, :cf, :sdi)",
+            {
+                "nome": str(s_nome).strip(),
+                "piva": str(s_piva).strip(),
+                "cf": str(s_cf).strip(),
+                "sdi": str(s_sdi).strip(),
+            },
         )
-        conn.commit()
-        cursor.close()
+        w_conn.commit()
+        w_conn.close()
         st.success(f"Sponsor {s_nome} registrato!")
         st.rerun()
 
@@ -1090,62 +1088,61 @@ elif menu == "Sponsor & Pubblicità (398/98)":
             )["id"].iloc[0]
         )
 
-        try:
-          conn.commit()
-        except Exception:
-          pass
-
-        cursor = conn.cursor()
-        cursor.execute(
+        w_conn = get_connection()
+        w_cur = w_conn.cursor()
+        w_cur.execute(
             "INSERT INTO fatture_sponsor_398 (numero_fattura, data_fattura,"
             " sponsor_id, oggetto_contratto, imponibile, aliquota_iva,"
             " iva_totale, totale_fattura, iva_da_versare_50, stima_ires_3)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                str(num_fat).strip(),
-                str(data_fat),
-                int(spon_dict[spon_sel]),
-                str(oggetto).strip(),
-                float(imponibile),
-                float(aliquota),
-                float(iva_totale),
-                float(totale_fattura),
-                float(iva_da_versare_50),
-                float(stima_ires_3),
-            ),
+            " VALUES (:num, :data, :spon, :ogg, :imp, :ali, :iva_tot, :tot_fat,"
+            " :iva_50, :ires_3)",
+            {
+                "num": str(num_fat).strip(),
+                "data": str(data_fat),
+                "spon": int(spon_dict[spon_sel]),
+                "ogg": str(oggetto).strip(),
+                "imp": float(imponibile),
+                "ali": float(aliquota),
+                "iva_tot": float(iva_totale),
+                "tot_fat": float(totale_fattura),
+                "iva_50": float(iva_da_versare_50),
+                "ires_3": float(stima_ires_3),
+            },
         )
 
-        cursor.execute(
+        w_cur.execute(
             "INSERT INTO movimenti_prima_nota (data_registrazione,"
-            " numero_documento, causale, tipo_attivita) VALUES (?, ?, ?,"
-            " 'COMMERCIALE_398')",
-            (str(data_fat), str(num_fat).strip(), f"Fattura Sponsor {spon_sel}"),
+            " numero_documento, causale, tipo_attivita) VALUES (:data, :num,"
+            " :causale, 'COMMERCIALE_398')",
+            {
+                "data": str(data_fat),
+                "num": str(num_fat).strip(),
+                "causale": f"Fattura Sponsor {spon_sel}",
+            },
         )
-        
-        res = pd.read_sql_query("SELECT MAX(id) as last_id FROM movimenti_prima_nota", conn)
-        mov_id = int(res["last_id"].iloc[0])
+        mov_id = int(w_cur.lastrowid)
 
-        cursor.execute(
+        w_cur.execute(
             "INSERT INTO righe_prima_nota (movimento_id, sottoconto_id,"
-            " descrizione, dare, avere) VALUES (?, ?, 'Credito v/Sponsor', ?,"
-            " 0.0)",
-            (mov_id, acc_cred, float(totale_fattura)),
+            " descrizione, dare, avere) VALUES (:mov_id, :acc, 'Credito"
+            " v/Sponsor', :tot, 0.0)",
+            {"mov_id": mov_id, "acc": acc_cred, "tot": float(totale_fattura)},
         )
-        cursor.execute(
+        w_cur.execute(
             "INSERT INTO righe_prima_nota (movimento_id, sottoconto_id,"
-            " descrizione, dare, avere) VALUES (?, ?, 'Ricavo Sponsor 398',"
-            " 0.0, ?)",
-            (mov_id, acc_ric, float(imponibile)),
+            " descrizione, dare, avere) VALUES (:mov_id, :acc, 'Ricavo Sponsor"
+            " 398', 0.0, :imp)",
+            {"mov_id": mov_id, "acc": acc_ric, "imp": float(imponibile)},
         )
-        cursor.execute(
+        w_cur.execute(
             "INSERT INTO righe_prima_nota (movimento_id, sottoconto_id,"
-            " descrizione, dare, avere) VALUES (?, ?, 'IVA 398/98 50%', 0.0,"
-            " ?)",
-            (mov_id, acc_iva, float(iva_da_versare_50)),
+            " descrizione, dare, avere) VALUES (:mov_id, :acc, 'IVA 398/98 50%',"
+            " 0.0, :iva)",
+            {"mov_id": mov_id, "acc": acc_iva, "iva": float(iva_da_versare_50)},
         )
 
-        conn.commit()
-        cursor.close()
+        w_conn.commit()
+        w_conn.close()
         st.success(
             "Fattura Sponsor registrata con successo per il commercialista e"
             " nel Registro 398/98!"
@@ -1224,38 +1221,35 @@ elif menu == "Lavoro Sportivo & Rimborsi (D.Lgs. 36)":
               + importo_lordo
           )
 
-          try:
-            conn.commit()
-          except Exception:
-            pass
-
-          cursor = conn.cursor()
           rit_inps = (
               (prog_inps - 5000.0) * 0.25 * 0.50 if prog_inps > 5000.0 else 0.0
           )
           rit_irpef = (prog_inps - 15000.0) * 0.23 if prog_inps > 15000.0 else 0.0
           importo_netto = importo_lordo - rit_inps - rit_irpef
 
-          cursor.execute(
+          w_conn = get_connection()
+          w_cur = w_conn.cursor()
+          w_cur.execute(
               "INSERT INTO compensi_sportivi (collaboratore_id,"
               " data_erogazione, causale, importo_lordo, progressivo_inps_anno,"
               " progressivo_irpef_anno, ritenuta_inps, ritenuta_irpef,"
-              " importo_netto) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-              (
-                  coll_id,
-                  str(data_erog),
-                  str(causale_c).strip(),
-                  float(importo_lordo),
-                  float(prog_inps),
-                  float(prog_inps),
-                  float(rit_inps),
-                  float(rit_irpef),
-                  float(importo_netto),
-              ),
+              " importo_netto) VALUES (:coll_id, :data, :causale, :lordo,"
+              " :prog_inps, :prog_irpef, :rit_inps, :rit_irpef, :netto)",
+              {
+                  "coll_id": coll_id,
+                  "data": str(data_erog),
+                  "causale": str(causale_c).strip(),
+                  "lordo": float(importo_lordo),
+                  "prog_inps": float(prog_inps),
+                  "prog_irpef": float(prog_inps),
+                  "rit_inps": float(rit_inps),
+                  "rit_irpef": float(rit_irpef),
+                  "netto": float(importo_netto),
+              },
           )
 
-          conn.commit()
-          cursor.close()
+          w_conn.commit()
+          w_conn.close()
           st.success(
               f"Compenso registrato! Progressivo Annuo: € {prog_inps:.2f} |"
               f" Netto a Pagar: € {importo_netto:.2f}"
@@ -1296,30 +1290,26 @@ elif menu == "Lavoro Sportivo & Rimborsi (D.Lgs. 36)":
       )
 
       if st.form_submit_button("Registra Distinta Rimborso Trasferta"):
-        try:
-          conn.commit()
-        except Exception:
-          pass
-
-        cursor = conn.cursor()
-        cursor.execute(
+        w_conn = get_connection()
+        w_cur = w_conn.cursor()
+        w_cur.execute(
             "INSERT INTO rimborsi_trasferta (anagrafica_id, data_partita,"
             " incontro_calcio, luogo_trasferta, km_percorsi, tariffa_aci,"
-            " spese_pie_di_lista, totale_rimborso) VALUES (?, ?, ?, ?, ?, ?,"
-            " ?, ?)",
-            (
-                int(a_dict[atleta_sel]),
-                str(data_partita),
-                str(incontro).strip(),
-                str(luogo).strip(),
-                float(km),
-                float(tariffa_aci),
-                float(spese_doc),
-                float(tot_rimborso),
-            ),
+            " spese_pie_di_lista, totale_rimborso) VALUES (:anag, :data,"
+            " :incontro, :luogo, :km, :aci, :spese, :tot)",
+            {
+                "anag": int(a_dict[atleta_sel]),
+                "data": str(data_partita),
+                "incontro": str(incontro).strip(),
+                "luogo": str(luogo).strip(),
+                "km": float(km),
+                "aci": float(tariffa_aci),
+                "spese": float(spese_doc),
+                "tot": float(tot_rimborso),
+            },
         )
-        conn.commit()
-        cursor.close()
+        w_conn.commit()
+        w_conn.close()
         st.success("Rimborso trasferta registrato!")
         st.rerun()
 
@@ -1386,12 +1376,8 @@ elif menu == "Riconciliazione Estratti Conto":
 
         col_save, _ = st.columns([2, 1])
         if col_save.button("💾 Salva e Importa Movimenti nel Database"):
-          try:
-            conn.commit()
-          except Exception:
-            pass
-
-          cursor = conn.cursor()
+          w_conn = get_connection()
+          w_cur = w_conn.cursor()
           saved_count = 0
           fonte_str = "PAYPAL" if "PayPal" in tipo_fonte else "BANCA"
 
@@ -1403,16 +1389,25 @@ elif menu == "Riconciliazione Estratti Conto":
             imp_n = float(row["importo_netto"])
             st_ric = str(row.get("stato_riconciliazione", "DA_RICONCILIARE"))
 
-            cursor.execute(
+            w_cur.execute(
                 "INSERT INTO estratti_conto_importati (fonte, data_transazione,"
                 " descrizione, importo_lordo, commissione, importo_netto,"
-                " stato_riconciliazione) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (fonte_str, d_trans, desc_t, imp_l, comm_t, imp_n, st_ric),
+                " stato_riconciliazione) VALUES (:fonte, :data, :desc, :lordo,"
+                " :comm, :netto, :st_ric)",
+                {
+                    "fonte": fonte_str,
+                    "data": d_trans,
+                    "desc": desc_t,
+                    "lordo": imp_l,
+                    "comm": comm_t,
+                    "netto": imp_n,
+                    "st_ric": st_ric,
+                },
             )
             saved_count += 1
 
-          conn.commit()
-          cursor.close()
+          w_conn.commit()
+          w_conn.close()
           st.success(
               f"🎉 Salvati con successo **{saved_count}** movimenti bancari nel"
               " database!"
@@ -1463,37 +1458,29 @@ elif menu == "Riconciliazione Estratti Conto":
 
       if c_m3.button("Aggiorna Stato"):
         mov_id_sel = int(mov_dict[mov_sel])
-        try:
-          conn.commit()
-        except Exception:
-          pass
-
-        cursor = conn.cursor()
-        cursor.execute(
-            "UPDATE estratti_conto_importati SET stato_riconciliazione = ?"
-            " WHERE id = ?",
-            (str(nuovo_stato), mov_id_sel),
+        w_conn = get_connection()
+        w_cur = w_conn.cursor()
+        w_cur.execute(
+            "UPDATE estratti_conto_importati SET stato_riconciliazione = :st"
+            " WHERE id = :id",
+            {"st": str(nuovo_stato), "id": mov_id_sel},
         )
-        conn.commit()
-        cursor.close()
+        w_conn.commit()
+        w_conn.close()
         st.success(f"Movimento ID {mov_id_sel} aggiornato a '{nuovo_stato}'!")
         st.rerun()
 
       with st.expander("🗑️ Elimina Movimento Selezionato"):
         if st.button("Conferma Eliminazione Record"):
           mov_id_sel = int(mov_dict[mov_sel])
-          try:
-            conn.commit()
-          except Exception:
-            pass
-
-          cursor = conn.cursor()
-          cursor.execute(
-              "DELETE FROM estratti_conto_importati WHERE id = ?",
-              (mov_id_sel,),
+          w_conn = get_connection()
+          w_cur = w_conn.cursor()
+          w_cur.execute(
+              "DELETE FROM estratti_conto_importati WHERE id = :id",
+              {"id": mov_id_sel},
           )
-          conn.commit()
-          cursor.close()
+          w_conn.commit()
+          w_conn.close()
           st.success("Movimento eliminato dal database!")
           st.rerun()
     else:
@@ -1522,28 +1509,24 @@ elif menu == "Riconciliazione Estratti Conto":
       if st.form_submit_button("Salva Movimento nel Database"):
         if m_desc and m_lordo != 0.0:
           m_netto = float(m_lordo) - float(m_comm)
-          try:
-            conn.commit()
-          except Exception:
-            pass
-
-          cursor = conn.cursor()
-          cursor.execute(
+          w_conn = get_connection()
+          w_cur = w_conn.cursor()
+          w_cur.execute(
               "INSERT INTO estratti_conto_importati (fonte, data_transazione,"
               " descrizione, importo_lordo, commissione, importo_netto,"
-              " stato_riconciliazione) VALUES (?, ?, ?, ?, ?, ?,"
-              " 'DA_RICONCILIARE')",
-              (
-                  str(m_fonte),
-                  str(m_data),
-                  str(m_desc).strip(),
-                  float(m_lordo),
-                  float(m_comm),
-                  float(m_netto),
-              ),
+              " stato_riconciliazione) VALUES (:fonte, :data, :desc, :lordo,"
+              " :comm, :netto, 'DA_RICONCILIARE')",
+              {
+                  "fonte": str(m_fonte),
+                  "data": str(m_data),
+                  "desc": str(m_desc).strip(),
+                  "lordo": float(m_lordo),
+                  "comm": float(m_comm),
+                  "netto": float(m_netto),
+              },
           )
-          conn.commit()
-          cursor.close()
+          w_conn.commit()
+          w_conn.close()
           st.success("Movimento salvato con successo nel database!")
           st.rerun()
         else:
@@ -1613,45 +1596,47 @@ elif menu == "Prima Nota & Rendiconto ASD":
 
         if st.form_submit_button("Salva Scrittura in Prima Nota"):
           if importo_dare > 0 and importo_dare == importo_avere:
-            try:
-              conn.commit()
-            except Exception:
-              pass
-
-            cursor = conn.cursor()
-            cursor.execute(
+            w_conn = get_connection()
+            w_cur = w_conn.cursor()
+            w_cur.execute(
                 "INSERT INTO movimenti_prima_nota (data_registrazione,"
-                " numero_documento, causale, tipo_attivita) VALUES (?, ?, ?, ?)",
-                (str(data_reg), str(num_doc).strip(), str(causale).strip(), str(tipo_att)),
+                " numero_documento, causale, tipo_attivita) VALUES (:data, :num,"
+                " :causale, :tipo)",
+                {
+                    "data": str(data_reg),
+                    "num": str(num_doc).strip(),
+                    "causale": str(causale).strip(),
+                    "tipo": str(tipo_att),
+                },
             )
-            
-            res = pd.read_sql_query("SELECT MAX(id) as last_id FROM movimenti_prima_nota", conn)
-            mov_id = int(res["last_id"].iloc[0])
+            mov_id = int(w_cur.lastrowid)
 
-            cursor.execute(
+            w_cur.execute(
                 "INSERT INTO righe_prima_nota (movimento_id, sottoconto_id,"
-                " descrizione, dare, avere) VALUES (?, ?, ?, ?, 0.00)",
-                (
-                    mov_id,
-                    int(pdc_dict[conto_dare]),
-                    str(causale).strip(),
-                    float(importo_dare),
-                ),
+                " descrizione, dare, avere) VALUES (:mov_id, :acc, :desc, :imp,"
+                " 0.00)",
+                {
+                    "mov_id": mov_id,
+                    "acc": int(pdc_dict[conto_dare]),
+                    "desc": str(causale).strip(),
+                    "imp": float(importo_dare),
+                },
             )
 
-            cursor.execute(
+            w_cur.execute(
                 "INSERT INTO righe_prima_nota (movimento_id, sottoconto_id,"
-                " descrizione, dare, avere) VALUES (?, ?, ?, 0.00, ?)",
-                (
-                    mov_id,
-                    int(pdc_dict[conto_avere]),
-                    str(causale).strip(),
-                    float(importo_avere),
-                ),
+                " descrizione, dare, avere) VALUES (:mov_id, :acc, :desc, 0.00,"
+                " :imp)",
+                {
+                    "mov_id": mov_id,
+                    "acc": int(pdc_dict[conto_avere]),
+                    "desc": str(causale).strip(),
+                    "imp": float(importo_avere),
+                },
             )
 
-            conn.commit()
-            cursor.close()
+            w_conn.commit()
+            w_conn.close()
             st.success("Scrittura registrata con successo!")
             st.rerun()
           else:
@@ -1703,21 +1688,22 @@ elif menu == "Piano dei Conti ASD":
   st.subheader("🌳 Struttura del Piano dei Conti ASD (Legge 398/98)")
 
   if st.button("🔄 Ripopola Piano dei Conti Predefinito"):
-    try:
-      conn.commit()
-    except Exception:
-      pass
-
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM piano_dei_conti;")
+    w_conn = get_connection()
+    w_cur = w_conn.cursor()
+    w_cur.execute("DELETE FROM piano_dei_conti;")
     for row in PIANO_DEI_CONTI_ASD:
-      cursor.execute(
+      w_cur.execute(
           "INSERT INTO piano_dei_conti (codice, nome, tipo, livello) VALUES"
-          " (?, ?, ?, ?);",
-          tuple(row),
+          " (:cod, :nome, :tipo, :liv);",
+          {
+              "cod": row[0],
+              "nome": row[1],
+              "tipo": row[2],
+              "liv": row[3],
+          },
       )
-    conn.commit()
-    cursor.close()
+    w_conn.commit()
+    w_conn.close()
     st.success("Piano dei Conti ripopolato con successo!")
     st.rerun()
 
