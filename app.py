@@ -352,11 +352,12 @@ elif menu == "Soci, Atleti & Dirigenza":
         "✏️ Modifica / Elimina Scheda"
     ])
 
-    CATEGORIE_LISTA = ["DIRIGENZA", "STAFF", "PRIMA_SQUADRA", "JUNIORES", "ALLIEVI", "GIOVANISSIMI", "SCUOLA_CALCIO", "SOCIO"]
+    # Allineato rigorosamente ai valori ammessi dal vincolo CHECK del database
+    CATEGORIE_LISTA = ["STAFF", "PRIMA_SQUADRA", "JUNIORES", "ALLIEVI", "GIOVANISSIMI", "SCUOLA_CALCIO"]
     RUOLI_LISTA = ["Presidente", "Vice Presidente", "Consigliere", "Dirigente", "Dirigente Accompagnatore", "Segretario", "Allenatore", "Portiere", "Difensore", "Centrocampista", "Attaccante", "Socio"]
 
     with tab_list:
-        filtro_cat = st.selectbox("Filtra per Categoria / Ruolo", ["TUTTI"] + CATEGORIE_LISTA)
+        filtro_cat = st.selectbox("Filtra per Categoria / Inquadramento", ["TUTTI"] + CATEGORIE_LISTA)
         conn = get_ro_conn()
         try:
             query_anag = """
@@ -440,7 +441,7 @@ elif menu == "Soci, Atleti & Dirigenza":
                 "Cognome_Nome": "Rossi Mario",
                 "Codice_Fiscale": "RSSMRA90A01H501U",
                 "Matricola_Tessera_N": "1234567",
-                "Categoria": "DIRIGENZA",
+                "Categoria": "STAFF",
                 "Ruolo": "Dirigente",
                 "Quota_Stagionale": 0.00,
                 "Data_Rilascio_Certificato": "2026-06-01",
@@ -488,7 +489,8 @@ elif menu == "Soci, Atleti & Dirigenza":
                                     matricola_val = row.get("Matricola_Tessera_N") if pd.notna(row.get("Matricola_Tessera_N")) else row.get("Matricola_FIGC", "")
                                     matricola = str(matricola_val).strip() if pd.notna(matricola_val) else ""
 
-                                    categoria = str(row.get("Categoria", "DIRIGENZA")).strip() if pd.notna(row.get("Categoria")) else "DIRIGENZA"
+                                    cat_imported = str(row.get("Categoria", "STAFF")).strip() if pd.notna(row.get("Categoria")) else "STAFF"
+                                    categoria = cat_imported if cat_imported in CATEGORIE_LISTA else "STAFF"
                                     ruolo = str(row.get("Ruolo", "Dirigente")).strip() if pd.notna(row.get("Ruolo")) else "Dirigente"
 
                                     quota_raw = str(row.get("Quota_Stagionale", 0)).replace(",", ".")
@@ -558,7 +560,8 @@ elif menu == "Soci, Atleti & Dirigenza":
 
             has_tess = not df_t.empty
             cur_matricola = first_val(df_t, "matricola_figc")
-            cur_cat = first_val(df_t, "categoria", "DIRIGENZA")
+            cur_cat_raw = first_val(df_t, "categoria", "STAFF")
+            cur_cat = cur_cat_raw if cur_cat_raw in CATEGORIE_LISTA else "STAFF"
             cur_role = first_val(df_t, "ruolo", "Dirigente")
             cur_quota = float(first_val(df_t, "quota_stagionale", 0.0))
             cur_stato = first_val(df_t, "stato", "ATTIVO")
