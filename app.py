@@ -76,7 +76,7 @@ def get_ro_conn():
 def get_conto_id(conn, codice):
     """Restituisce l'ID del conto dal Piano dei Conti verificandone l'esistenza."""
     cur = conn.cursor()
-    cur.execute("SELECT id FROM piano_dei_conti WHERE codice = :cod", {"cod": codice})
+    cur.execute("SELECT id FROM piano_dei_conti WHERE codice = ?", (codice,))
     res = cur.fetchone()
     if not res:
         raise ValueError(f"Conto '{codice}' non trovato nel Piano dei Conti!")
@@ -100,22 +100,16 @@ def post_journal(cur, data_reg, num_doc, causale, tipo_att, righe):
 
     cur.execute(
         "INSERT INTO movimenti_prima_nota (data_registrazione, numero_documento, causale, tipo_attivita) "
-        "VALUES (:data, :num, :causale, :tipo)",
-        {"data": str(data_reg), "num": str(num_doc).strip(), "causale": str(causale).strip(), "tipo": str(tipo_att)}
+        "VALUES (?, ?, ?, ?)",
+        (str(data_reg), str(num_doc).strip(), str(causale).strip(), str(tipo_att))
     )
     mov_id = cur.lastrowid
 
     for acc_id, desc, dare, avere in righe:
         cur.execute(
             "INSERT INTO righe_prima_nota (movimento_id, sottoconto_id, descrizione, dare, avere) "
-            "VALUES (:mov, :acc, :desc, :dare, :avere)",
-            {
-                "mov": mov_id,
-                "acc": acc_id,
-                "desc": str(desc).strip(),
-                "dare": float(dare),
-                "avere": float(avere)
-            }
+            "VALUES (?, ?, ?, ?, ?)",
+            (mov_id, acc_id, str(desc).strip(), float(dare), float(avere))
         )
 
 # ---------------------------------------------------------
@@ -161,7 +155,7 @@ def parse_bank_statement(file_bytes, file_name, tipo_fonte="BANCA"):
     for idx, row in df.iterrows():
         row_str = " ".join([str(val).lower() for val in row.values if pd.notna(val)])
         matches = sum(1 for kw in keywords if kw in row_str)
-        if matches >= 2:  # Richiesti almeno 2 match per evitare falsi positivi sulle intestazioni
+        if matches >= 2:
             header_idx = idx
             break
 
@@ -236,7 +230,7 @@ def parse_bank_statement(file_bytes, file_name, tipo_fonte="BANCA"):
     for _, row in df_data.iterrows():
         dt_val = clean_date(row.get(col_data, ""))
         if not dt_val:
-            continue  # Scarta le righe con data invalida o assente
+            continue
 
         desc_val = str(row.get(col_desc, "")).strip() if col_desc else "Movimento Bancario"
         if not desc_val or desc_val.lower() == "nan":
@@ -282,7 +276,6 @@ if menu == "Dashboard & Alert Scadenze":
 
     conn = get_ro_conn()
     try:
-        # Query certificati unificata sul certificato più recente per ciascuna anagrafica
         df_cert_alert = pd.read_sql_query(
             """
             SELECT a.denominazione as 'Calciatore', c.tipo, c.data_scadenza as 'Scadenza', c.stato_idoneita
@@ -292,11 +285,11 @@ if menu == "Dashboard & Alert Scadenze":
                 GROUP BY anagrafica_id
             ) c
             JOIN anagrafiche a ON c.anagrafica_id = a.id
-            WHERE c.data_scadenza <= :in_30_days
+            WHERE c.data_scadenza <= ?
             ORDER BY c.data_scadenza ASC
             """,
             conn,
-            params={"in_30_days": in_30_days}
+            params=[in_30_days]
         )
 
         num_tesserati = pd.read_sql_query(
@@ -304,21 +297,21 @@ if menu == "Dashboard & Alert Scadenze":
         )["tot"].iloc[0]
 
         tot_sponsor = pd.read_sql_query(
-            "SELECT COALESCE(SUM(imponibile), 0.0) as tot FROM fatture_sponsor_398 WHERE strftime('%Y', data_fattura) = :anno",
+            "SELECT COALESCE(SUM(imponibile), 0.0) as tot FROM fatture_sponsor_398 WHERE strftime('%Y', data_fattura) = ?",
             conn,
-            params={"anno": current_year}
+            params=[current_year]
         )["tot"].iloc[0]
 
         iva_50_versare = pd.read_sql_query(
-            "SELECT COALESCE(SUM(iva_da_versare_50), 0.0) as tot FROM fatture_sponsor_398 WHERE strftime('%Y', data_fattura) = :anno",
+            "SELECT COALESCE(SUM(iva_da_versare_50), 0.0) as tot FROM fatture_sponsor_398 WHERE strftime('%Y', data_fattura) = ?",
             conn,
-            params={"anno": current_year}
+            params=[current_year]
         )["tot"].iloc[0]
 
         tot_quote = pd.read_sql_query(
-            "SELECT COALESCE(SUM(importo), 0.0) as tot FROM ricevute_istituzionali WHERE strftime('%Y', data_emissione) = :anno",
+            "SELECT COALESCE(SUM(importo), 0.0) as tot FROM ricevute_istituzionali WHERE strftime('%Y', data_emissione) = ?",
             conn,
-            params={"anno": current_year}
+            params=[current_year]
         )["tot"].iloc[0]
     finally:
         conn.close()
@@ -377,10 +370,10 @@ elif menu == "Soci, Atleti & Dirigenza":
                 ) c ON c.anagrafica_id = a.id
                 WHERE a.tipo IN ('SOCIO_CALCIATORE', 'ALTRO')
             """
-            params = {}
+            params = []
             if filtro_cat != "TUTTI":
-                query_anag += " AND t.categoria = :cat"
-                params["cat"] = filtro_cat
+                query_anag += " AND t.categoria = ?"
+                params.append(filtro_cat)
             query_anag += " ORDER BY t.categoria, a.denominazione"
 
             df_anag_view = pd.read_sql_query(query_anag, conn, params=params)
@@ -412,32 +405,21 @@ elif menu == "Soci, Atleti & Dirigenza":
                     if nome:
                         with db_write() as w_cur:
                             w_cur.execute(
-                                "INSERT INTO anagrafiche (tipo, denominazione, codice_fiscale) VALUES ('SOCIO_CALCIATORE', :nome, :cf)",
-                                {"nome": str(nome).strip(), "cf": str(cf).strip()}
+                                "INSERT INTO anagrafiche (tipo, denominazione, codice_fiscale) VALUES ('SOCIO_CALCIATORE', ?, ?)",
+                                (str(nome).strip(), str(cf).strip())
                             )
                             anag_id = w_cur.lastrowid
 
                             w_cur.execute(
                                 "INSERT INTO tesserati_calcio (anagrafica_id, matricola_figc, categoria, ruolo, data_tesseramento, quota_stagionale) "
-                                "VALUES (:id, :matricola, :cat, :ruolo, strftime('%Y-%m-%d', 'now'), :quota)",
-                                {
-                                    "id": anag_id,
-                                    "matricola": str(matricola).strip(),
-                                    "cat": str(categoria),
-                                    "ruolo": str(ruolo),
-                                    "quota": float(quota)
-                                }
+                                "VALUES (?, ?, ?, ?, strftime('%Y-%m-%d', 'now'), ?)",
+                                (anag_id, str(matricola).strip(), str(categoria), str(ruolo), float(quota))
                             )
 
                             w_cur.execute(
                                 "INSERT INTO certificati_medici (anagrafica_id, tipo, data_rilascio, data_scadenza, medico_certificatore, stato_idoneita) "
-                                "VALUES (:id, 'AGONISTICO', :data_ril, :data_scad, :medico, 'IDONEO')",
-                                {
-                                    "id": anag_id,
-                                    "data_ril": str(data_ril),
-                                    "data_scad": str(data_scad),
-                                    "medico": str(medico).strip()
-                                }
+                                "VALUES (?, 'AGONISTICO', ?, ?, ?, 'IDONEO')",
+                                (anag_id, str(data_ril), str(data_scad), str(medico).strip())
                             )
 
                         st.session_state["flash"] = f"Anagrafica '{nome}' salvata con successo!"
@@ -489,9 +471,8 @@ elif menu == "Soci, Atleti & Dirigenza":
 
                                     cf = str(row.get("Codice_Fiscale", "")).strip() if pd.notna(row.get("Codice_Fiscale")) else ""
 
-                                    # Verifica duplicati su Codice Fiscale
                                     if cf:
-                                        w_cur.execute("SELECT id FROM anagrafiche WHERE codice_fiscale = :cf", {"cf": cf})
+                                        w_cur.execute("SELECT id FROM anagrafiche WHERE codice_fiscale = ?", (cf,))
                                         if w_cur.fetchone():
                                             errors.append(f"Riga {i+2}: Codice Fiscale {cf} già esistente.")
                                             continue
@@ -509,23 +490,23 @@ elif menu == "Soci, Atleti & Dirigenza":
                                     scad_medica = str(row.get("Scadenza_Certificato", "")).strip()[:10] if pd.notna(row.get("Scadenza_Certificato")) else ""
 
                                     w_cur.execute(
-                                        "INSERT INTO anagrafiche (tipo, denominazione, codice_fiscale) VALUES ('SOCIO_CALCIATORE', :nome, :cf)",
-                                        {"nome": nome, "cf": cf}
+                                        "INSERT INTO anagrafiche (tipo, denominazione, codice_fiscale) VALUES ('SOCIO_CALCIATORE', ?, ?)",
+                                        (nome, cf)
                                     )
                                     anag_id = w_cur.lastrowid
 
                                     w_cur.execute(
                                         "INSERT INTO tesserati_calcio (anagrafica_id, matricola_figc, categoria, ruolo, data_tesseramento, quota_stagionale) "
-                                        "VALUES (:id, :matricola, :cat, :ruolo, strftime('%Y-%m-%d', 'now'), :quota)",
-                                        {"id": anag_id, "matricola": matricola, "cat": categoria, "ruolo": ruolo, "quota": quota_stag}
+                                        "VALUES (?, ?, ?, ?, strftime('%Y-%m-%d', 'now'), ?)",
+                                        (anag_id, matricola, categoria, ruolo, quota_stag)
                                     )
 
                                     if scad_medica and scad_medica.lower() != "nan":
                                         rilascio = data_ril if (data_ril and data_ril.lower() != "nan") else "2026-01-01"
                                         w_cur.execute(
                                             "INSERT INTO certificati_medici (anagrafica_id, tipo, data_rilascio, data_scadenza, stato_idoneita) "
-                                            "VALUES (:id, 'AGONISTICO', :data_ril, :data_scad, 'IDONEO')",
-                                            {"id": anag_id, "data_ril": rilascio, "data_scad": scad_medica}
+                                            "VALUES (?, 'AGONISTICO', ?, ?, 'IDONEO')",
+                                            (anag_id, rilascio, scad_medica)
                                         )
                                     count += 1
                                 except Exception as ex_row:
@@ -559,9 +540,9 @@ elif menu == "Soci, Atleti & Dirigenza":
 
             conn = get_ro_conn()
             try:
-                df_a = pd.read_sql_query("SELECT denominazione, codice_fiscale FROM anagrafiche WHERE id = :id", conn, params={"id": selected_anag_id})
-                df_t = pd.read_sql_query("SELECT id, matricola_figc, categoria, ruolo, quota_stagionale, stato FROM tesserati_calcio WHERE anagrafica_id = :id ORDER BY id DESC LIMIT 1", conn, params={"id": selected_anag_id})
-                df_c = pd.read_sql_query("SELECT id, data_rilascio, data_scadenza, medico_certificatore FROM certificati_medici WHERE anagrafica_id = :id ORDER BY id DESC LIMIT 1", conn, params={"id": selected_anag_id})
+                df_a = pd.read_sql_query("SELECT denominazione, codice_fiscale FROM anagrafiche WHERE id = ?", conn, params=[selected_anag_id])
+                df_t = pd.read_sql_query("SELECT id, matricola_figc, categoria, ruolo, quota_stagionale, stato FROM tesserati_calcio WHERE anagrafica_id = ? ORDER BY id DESC LIMIT 1", conn, params=[selected_anag_id])
+                df_c = pd.read_sql_query("SELECT id, data_rilascio, data_scadenza, medico_certificatore FROM certificati_medici WHERE anagrafica_id = ? ORDER BY id DESC LIMIT 1", conn, params=[selected_anag_id])
             finally:
                 conn.close()
 
@@ -621,34 +602,34 @@ elif menu == "Soci, Atleti & Dirigenza":
                 if st.form_submit_button("💾 Salva Modifiche Scheda"):
                     with db_write() as w_cur:
                         w_cur.execute(
-                            "UPDATE anagrafiche SET denominazione = :nome, codice_fiscale = :cf WHERE id = :id",
-                            {"nome": str(e_nome).strip(), "cf": str(e_cf).strip(), "id": selected_anag_id}
+                            "UPDATE anagrafiche SET denominazione = ?, codice_fiscale = ? WHERE id = ?",
+                            (str(e_nome).strip(), str(e_cf).strip(), selected_anag_id)
                         )
 
                         if has_tess:
                             t_id = int(df_t["id"].iloc[0])
                             w_cur.execute(
-                                "UPDATE tesserati_calcio SET matricola_figc = :matricola, categoria = :cat, ruolo = :ruolo, quota_stagionale = :quota, stato = :stato WHERE id = :tid",
-                                {"matricola": str(e_matricola).strip(), "cat": str(e_categoria), "ruolo": str(e_ruolo), "quota": float(e_quota), "stato": str(e_stato), "tid": t_id}
+                                "UPDATE tesserati_calcio SET matricola_figc = ?, categoria = ?, ruolo = ?, quota_stagionale = ?, stato = ? WHERE id = ?",
+                                (str(e_matricola).strip(), str(e_categoria), str(e_ruolo), float(e_quota), str(e_stato), t_id)
                             )
                         else:
                             w_cur.execute(
                                 "INSERT INTO tesserati_calcio (anagrafica_id, matricola_figc, categoria, ruolo, data_tesseramento, quota_stagionale, stato) "
-                                "VALUES (:id, :matricola, :cat, :ruolo, strftime('%Y-%m-%d', 'now'), :quota, :stato)",
-                                {"id": selected_anag_id, "matricola": str(e_matricola).strip(), "cat": str(e_categoria), "ruolo": str(e_ruolo), "quota": float(e_quota), "stato": str(e_stato)}
+                                "VALUES (?, ?, ?, ?, strftime('%Y-%m-%d', 'now'), ?, ?)",
+                                (selected_anag_id, str(e_matricola).strip(), str(e_categoria), str(e_ruolo), float(e_quota), str(e_stato))
                             )
 
                         if has_cert:
                             c_id = int(df_c["id"].iloc[0])
                             w_cur.execute(
-                                "UPDATE certificati_medici SET data_rilascio = :data_ril, data_scadenza = :data_scad, medico_certificatore = :medico WHERE id = :cid",
-                                {"data_ril": str(e_data_ril), "data_scad": str(e_data_scad), "medico": str(e_medico).strip(), "cid": c_id}
+                                "UPDATE certificati_medici SET data_rilascio = ?, data_scadenza = ?, medico_certificatore = ? WHERE id = ?",
+                                (str(e_data_ril), str(e_data_scad), str(e_medico).strip(), c_id)
                             )
                         elif e_data_scad:
                             w_cur.execute(
                                 "INSERT INTO certificati_medici (anagrafica_id, tipo, data_rilascio, data_scadenza, medico_certificatore, stato_idoneita) "
-                                "VALUES (:id, 'AGONISTICO', :data_ril, :data_scad, :medico, 'IDONEO')",
-                                {"id": selected_anag_id, "data_ril": str(e_data_ril), "data_scad": str(e_data_scad), "medico": str(e_medico).strip()}
+                                "VALUES (?, 'AGONISTICO', ?, ?, ?, 'IDONEO')",
+                                (selected_anag_id, str(e_data_ril), str(e_data_scad), str(e_medico).strip())
                             )
 
                     st.session_state["flash"] = f"Scheda di '{e_nome}' aggiornata con successo!"
@@ -660,8 +641,8 @@ elif menu == "Soci, Atleti & Dirigenza":
                 if st.button("❌ Conferma Eliminazione Definitiva Persona"):
                     conn = get_ro_conn()
                     try:
-                        c_ric = conn.execute("SELECT COUNT(*) FROM ricevute_istituzionali WHERE anagrafica_id = :id", {"id": selected_anag_id}).fetchone()[0]
-                        c_comp = conn.execute("SELECT COUNT(*) FROM compensi_sportivi WHERE collaboratore_id IN (SELECT id FROM collaboratori_sportivi WHERE anagrafica_id = :id)", {"id": selected_anag_id}).fetchone()[0]
+                        c_ric = conn.execute("SELECT COUNT(*) FROM ricevute_istituzionali WHERE anagrafica_id = ?", (selected_anag_id,)).fetchone()[0]
+                        c_comp = conn.execute("SELECT COUNT(*) FROM compensi_sportivi WHERE collaboratore_id IN (SELECT id FROM collaboratori_sportivi WHERE anagrafica_id = ?)", (selected_anag_id,)).fetchone()[0]
                     finally:
                         conn.close()
 
@@ -669,10 +650,10 @@ elif menu == "Soci, Atleti & Dirigenza":
                         st.error("Impossibile eliminare l'anagrafica: risultano ricevute o compensi contabili associati.")
                     else:
                         with db_write() as w_cur:
-                            w_cur.execute("DELETE FROM certificati_medici WHERE anagrafica_id = :id", {"id": selected_anag_id})
-                            w_cur.execute("DELETE FROM tesserati_calcio WHERE anagrafica_id = :id", {"id": selected_anag_id})
-                            w_cur.execute("DELETE FROM collaboratori_sportivi WHERE anagrafica_id = :id", {"id": selected_anag_id})
-                            w_cur.execute("DELETE FROM anagrafiche WHERE id = :id", {"id": selected_anag_id})
+                            w_cur.execute("DELETE FROM certificati_medici WHERE anagrafica_id = ?", (selected_anag_id,))
+                            w_cur.execute("DELETE FROM tesserati_calcio WHERE anagrafica_id = ?", (selected_anag_id,))
+                            w_cur.execute("DELETE FROM collaboratori_sportivi WHERE anagrafica_id = ?", (selected_anag_id,))
+                            w_cur.execute("DELETE FROM anagrafiche WHERE id = ?", (selected_anag_id,))
 
                         st.session_state["flash"] = "Anagrafica eliminata con successo!"
                         st.rerun()
@@ -694,8 +675,8 @@ elif menu == "Ricevute Istituzionali (Art. 4)":
                 if s_nome:
                     with db_write() as w_cur:
                         w_cur.execute(
-                            "INSERT INTO anagrafiche (tipo, denominazione, codice_fiscale, email) VALUES ('SOCIO_CALCIATORE', :nome, :cf, :email)",
-                            {"nome": str(s_nome).strip(), "cf": str(s_cf).strip(), "email": str(s_email).strip()}
+                            "INSERT INTO anagrafiche (tipo, denominazione, codice_fiscale, email) VALUES ('SOCIO_CALCIATORE', ?, ?, ?)",
+                            (str(s_nome).strip(), str(s_cf).strip(), str(s_email).strip())
                         )
                     st.session_state["flash"] = f"Socio '{s_nome}' aggiunto con successo!"
                     st.rerun()
@@ -720,7 +701,7 @@ elif menu == "Ricevute Istituzionali (Art. 4)":
 
             conn = get_ro_conn()
             try:
-                next_num = conn.execute("SELECT COUNT(*) + 1 FROM ricevute_istituzionali WHERE strftime('%Y', data_emissione) = :anno", {"anno": anno_ric}).fetchone()[0]
+                next_num = conn.execute("SELECT COUNT(*) + 1 FROM ricevute_istituzionali WHERE strftime('%Y', data_emissione) = ?", (anno_ric,)).fetchone()[0]
             finally:
                 conn.close()
 
@@ -751,16 +732,8 @@ elif menu == "Ricevute Istituzionali (Art. 4)":
                     with db_write() as w_cur:
                         w_cur.execute(
                             "INSERT INTO ricevute_istituzionali (numero_ricevuta, data_emissione, anagrafica_id, causale, importo, modalita_pagamento, marca_da_bollo) "
-                            "VALUES (:num, :data, :anag, :causale, :imp, :pag, :bollo)",
-                            {
-                                "num": str(num_ric).strip(),
-                                "data": str(data_ric),
-                                "anag": int(soci_dict[socio_sel]),
-                                "causale": str(causale_completa).strip(),
-                                "imp": float(importo),
-                                "pag": str(pagamento),
-                                "bollo": float(bollo)
-                            }
+                            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                            (str(num_ric).strip(), str(data_ric), int(soci_dict[socio_sel]), str(causale_completa).strip(), float(importo), str(pagamento), float(bollo))
                         )
 
                         righe_journal = [
@@ -810,8 +783,8 @@ elif menu == "Sponsor & Pubblicità (398/98)":
                 if s_nome:
                     with db_write() as w_cur:
                         w_cur.execute(
-                            "INSERT INTO anagrafiche (tipo, denominazione, partita_iva, codice_fiscale, codice_destinatario) VALUES ('SPONSOR', :nome, :piva, :cf, :sdi)",
-                            {"nome": str(s_nome).strip(), "piva": str(s_piva).strip(), "cf": str(s_cf).strip(), "sdi": str(s_sdi).strip()}
+                            "INSERT INTO anagrafiche (tipo, denominazione, partita_iva, codice_fiscale, codice_destinatario) VALUES ('SPONSOR', ?, ?, ?, ?)",
+                            (str(s_nome).strip(), str(s_piva).strip(), str(s_cf).strip(), str(s_sdi).strip())
                         )
                     st.session_state["flash"] = f"Sponsor '{s_nome}' registrato!"
                     st.rerun()
@@ -833,7 +806,7 @@ elif menu == "Sponsor & Pubblicità (398/98)":
 
             conn = get_ro_conn()
             try:
-                next_fat_num = conn.execute("SELECT COUNT(*) + 1 FROM fatture_sponsor_398 WHERE strftime('%Y', data_fattura) = :anno", {"anno": anno_fat}).fetchone()[0]
+                next_fat_num = conn.execute("SELECT COUNT(*) + 1 FROM fatture_sponsor_398 WHERE strftime('%Y', data_fattura) = ?", (anno_fat,)).fetchone()[0]
             finally:
                 conn.close()
 
@@ -862,22 +835,10 @@ elif menu == "Sponsor & Pubblicità (398/98)":
                     with db_write() as w_cur:
                         w_cur.execute(
                             "INSERT INTO fatture_sponsor_398 (numero_fattura, data_fattura, sponsor_id, oggetto_contratto, imponibile, aliquota_iva, iva_totale, totale_fattura, iva_da_versare_50, stima_ires_3) "
-                            "VALUES (:num, :data, :spon, :ogg, :imp, :ali, :iva_tot, :tot_fat, :iva_50, :ires_3)",
-                            {
-                                "num": str(num_fat).strip(),
-                                "data": str(data_fat),
-                                "spon": int(spon_dict[spon_sel]),
-                                "ogg": str(oggetto).strip(),
-                                "imp": float(imponibile),
-                                "ali": float(aliquota),
-                                "iva_tot": float(iva_totale),
-                                "tot_fat": float(totale_fattura),
-                                "iva_50": float(iva_da_versare_50),
-                                "ires_3": float(stima_ires_3)
-                            }
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            (str(num_fat).strip(), str(data_fat), int(spon_dict[spon_sel]), str(oggetto).strip(), float(imponibile), float(aliquota), float(iva_totale), float(totale_fattura), float(iva_da_versare_50), float(stima_ires_3))
                         )
 
-                        # Scrittura bilanciata a Partita Doppia (100% Dare == 100% Avere)
                         righe_journal = [
                             (acc_cred, f"Credito v/Sponsor {spon_sel}", float(totale_fattura), 0.0),
                             (acc_ric, "Ricavo Sponsor 398", 0.0, float(imponibile)),
@@ -944,8 +905,8 @@ elif menu == "Lavoro Sportivo & Rimborsi (D.Lgs. 36)":
                         try:
                             prev_prog = conn.execute(
                                 "SELECT COALESCE(SUM(importo_lordo), 0.0) as tot FROM compensi_sportivi "
-                                "WHERE collaboratore_id = :id AND strftime('%Y', data_erogazione) = :anno",
-                                {"id": coll_id, "anno": anno_erog}
+                                "WHERE collaboratore_id = ? AND strftime('%Y', data_erogazione) = ?",
+                                (coll_id, anno_erog)
                             ).fetchone()[0]
                         finally:
                             conn.close()
@@ -969,18 +930,8 @@ elif menu == "Lavoro Sportivo & Rimborsi (D.Lgs. 36)":
                         with db_write() as w_cur:
                             w_cur.execute(
                                 "INSERT INTO compensi_sportivi (collaboratore_id, data_erogazione, causale, importo_lordo, progressivo_inps_anno, progressivo_irpef_anno, ritenuta_inps, ritenuta_irpef, importo_netto) "
-                                "VALUES (:coll_id, :data, :causale, :lordo, :prog_inps, :prog_irpef, :rit_inps, :rit_irpef, :netto)",
-                                {
-                                    "coll_id": coll_id,
-                                    "data": str(data_erog),
-                                    "causale": str(causale_c).strip(),
-                                    "lordo": float(importo_lordo),
-                                    "prog_inps": float(new_prog),
-                                    "prog_irpef": float(new_prog),
-                                    "rit_inps": float(rit_inps),
-                                    "rit_irpef": float(rit_irpef),
-                                    "netto": float(importo_netto)
-                                }
+                                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                (coll_id, str(data_erog), str(causale_c).strip(), float(importo_lordo), float(new_prog), float(new_prog), float(rit_inps), float(rit_irpef), float(importo_netto))
                             )
 
                         st.session_state["flash"] = f"Compenso erogato! Netto a pagare: € {importo_netto:.2f} (Progressivo {anno_erog}: € {new_prog:.2f})"
@@ -1016,17 +967,8 @@ elif menu == "Lavoro Sportivo & Rimborsi (D.Lgs. 36)":
                         with db_write() as w_cur:
                             w_cur.execute(
                                 "INSERT INTO rimborsi_trasferta (anagrafica_id, data_partita, incontro_calcio, luogo_trasferta, km_percorsi, tariffa_aci, spese_pie_di_lista, totale_rimborso) "
-                                "VALUES (:anag, :data, :incontro, :luogo, :km, :aci, :spese, :tot)",
-                                {
-                                    "anag": int(a_dict[atleta_sel]),
-                                    "data": str(data_partita),
-                                    "incontro": str(incontro).strip(),
-                                    "luogo": str(luogo).strip(),
-                                    "km": float(km),
-                                    "aci": float(tariffa_aci),
-                                    "spese": float(spese_doc),
-                                    "tot": float(tot_rimborso)
-                                }
+                                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                                (int(a_dict[atleta_sel]), str(data_partita), str(incontro).strip(), str(luogo).strip(), float(km), float(tariffa_aci), float(spese_doc), float(tot_rimborso))
                             )
                         st.session_state["flash"] = f"Rimborso trasferta di € {tot_rimborso:.2f} registrato per {atleta_sel}!"
                         st.rerun()
@@ -1087,16 +1029,8 @@ elif menu == "Riconciliazione Estratti Conto":
 
                             w_cur.execute(
                                 "INSERT INTO estratti_conto_importati (fonte, data_transazione, descrizione, importo_lordo, commissione, importo_netto, stato_riconciliazione) "
-                                "VALUES (:fonte, :data, :desc, :lordo, :comm, :netto, :st_ric)",
-                                {
-                                    "fonte": fonte_str,
-                                    "data": d_trans,
-                                    "desc": desc_t,
-                                    "lordo": imp_l,
-                                    "comm": comm_t,
-                                    "netto": imp_n,
-                                    "st_ric": st_ric
-                                }
+                                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                                (fonte_str, d_trans, desc_t, imp_l, comm_t, imp_n, st_ric)
                             )
                             saved_count += 1
 
@@ -1110,10 +1044,10 @@ elif menu == "Riconciliazione Estratti Conto":
         conn = get_ro_conn()
         try:
             query_str = "SELECT id, fonte as Fonte, data_transazione as Data, descrizione as Descrizione, importo_lordo as 'Lordo (€)', commissione as 'Commissione (€)', importo_netto as 'Netto (€)', stato_riconciliazione as Stato FROM estratti_conto_importati"
-            params = {}
+            params = []
             if filtro_stato != "TUTTI":
-                query_str += " WHERE stato_riconciliazione = :st"
-                params["st"] = filtro_stato
+                query_str += " WHERE stato_riconciliazione = ?"
+                params.append(filtro_stato)
             query_str += " ORDER BY id DESC LIMIT 500"
 
             df_db_saved = pd.read_sql_query(query_str, conn, params=params)
@@ -1136,8 +1070,8 @@ elif menu == "Riconciliazione Estratti Conto":
                 mov_id_sel = int(mov_dict[mov_sel])
                 with db_write() as w_cur:
                     w_cur.execute(
-                        "UPDATE estratti_conto_importati SET stato_riconciliazione = :st WHERE id = :id",
-                        {"st": str(nuovo_stato), "id": mov_id_sel}
+                        "UPDATE estratti_conto_importati SET stato_riconciliazione = ? WHERE id = ?",
+                        (str(nuovo_stato), mov_id_sel)
                     )
                 st.session_state["flash"] = f"Movimento ID {mov_id_sel} aggiornato a '{nuovo_stato}'!"
                 st.rerun()
@@ -1146,7 +1080,7 @@ elif menu == "Riconciliazione Estratti Conto":
                 if st.button("Conferma Eliminazione Record"):
                     mov_id_sel = int(mov_dict[mov_sel])
                     with db_write() as w_cur:
-                        w_cur.execute("DELETE FROM estratti_conto_importati WHERE id = :id", {"id": mov_id_sel})
+                        w_cur.execute("DELETE FROM estratti_conto_importati WHERE id = ?", (mov_id_sel,))
                     st.session_state["flash"] = "Movimento eliminato dal database!"
                     st.rerun()
         else:
@@ -1170,15 +1104,8 @@ elif menu == "Riconciliazione Estratti Conto":
                     with db_write() as w_cur:
                         w_cur.execute(
                             "INSERT INTO estratti_conto_importati (fonte, data_transazione, descrizione, importo_lordo, commissione, importo_netto, stato_riconciliazione) "
-                            "VALUES (:fonte, :data, :desc, :lordo, :comm, :netto, 'DA_RICONCILIARE')",
-                            {
-                                "fonte": str(m_fonte),
-                                "data": str(m_data),
-                                "desc": str(m_desc).strip(),
-                                "lordo": float(m_lordo),
-                                "comm": float(m_comm),
-                                "netto": float(m_netto)
-                            }
+                            "VALUES (?, ?, ?, ?, ?, ?, 'DA_RICONCILIARE')",
+                            (str(m_fonte), str(m_data), str(m_desc).strip(), float(m_lordo), float(m_comm), float(m_netto))
                         )
                     st.session_state["flash"] = "Movimento bancario salvato con successo!"
                     st.rerun()
@@ -1283,10 +1210,10 @@ elif menu == "Piano dei Conti ASD":
             for row in PIANO_DEI_CONTI_ASD:
                 w_cur.execute(
                     """
-                    INSERT INTO piano_dei_conti (codice, nome, tipo, livello) VALUES (:cod, :nome, :tipo, :liv)
+                    INSERT INTO piano_dei_conti (codice, nome, tipo, livello) VALUES (?, ?, ?, ?)
                     ON CONFLICT(codice) DO UPDATE SET nome = excluded.nome, tipo = excluded.tipo, livello = excluded.livello
                     """,
-                    {"cod": row[0], "nome": row[1], "tipo": row[2], "liv": row[3]}
+                    (row[0], row[1], row[2], row[3])
                 )
         st.session_state["flash"] = "Piano dei Conti ripopolato ed aggiornato con successo senza perdita di storico!"
         st.rerun()
