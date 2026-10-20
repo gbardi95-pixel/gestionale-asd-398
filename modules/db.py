@@ -316,6 +316,16 @@ def init_db():
     );
     """)
 
+    # Numeri di ricevute e fatture univoci (se nel DB esistono già doppioni l'indice non viene creato)
+    for indice_sql in (
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_ricevute_numero ON ricevute_istituzionali(numero_ricevuta);",
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_fatture_sponsor_numero ON fatture_sponsor_398(numero_fattura);",
+    ):
+        try:
+            cursor.execute(indice_sql)
+        except Exception:
+            pass
+
     # AUTO-POPOLAMENTO AUTOMATICO PIANO DEI CONTI
     cursor.execute("SELECT COUNT(*) FROM piano_dei_conti;")
     if cursor.fetchone()[0] == 0:

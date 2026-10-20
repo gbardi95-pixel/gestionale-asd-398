@@ -132,6 +132,24 @@ def first_val(df, col, default=""):
         return default
     return df[col].iloc[0]
 
+def prossimo_numero(conn, tabella, col_numero, col_data, anno):
+    """Prossimo progressivo dell'anno: il numero più alto già usato + 1 (non il conteggio, che crea doppioni se si cancella un documento)."""
+    res = conn.execute(
+        f"SELECT COALESCE(MAX(CAST({col_numero} AS INTEGER)), 0) + 1 FROM {tabella} WHERE strftime('%Y', {col_data}) = ?",
+        [str(anno)]
+    ).fetchone()
+    return int(res[0])
+
+def controlla_numero_documento(conn, tabella, col_numero, numero, anno):
+    """Restituisce un messaggio di errore se il numero è già usato o non riporta l'anno della data, altrimenti None."""
+    numero = str(numero).strip()
+    if f"/{anno}" not in numero:
+        return f"Il numero '{numero}' non contiene l'anno della data ({anno}): correggilo, es. 1/{anno}."
+    gia_usato = conn.execute(f"SELECT COUNT(*) FROM {tabella} WHERE {col_numero} = ?", [numero]).fetchone()[0]
+    if gia_usato:
+        return f"Il numero '{numero}' è già stato usato: scegline un altro."
+    return None
+
 def post_journal(conn, data_reg, num_doc, causale, tipo_att, righe):
     """
     Registra una scrittura di Prima Nota a Partita Doppia bilanciata.
@@ -243,6 +261,9 @@ def parse_bank_statement(file_bytes, file_name, tipo_fonte="BANCA"):
     def clean_num(val):
         if pd.isna(val) or val is None:
             return 0.0
+        # Celle numeriche di Excel: sono già numeri, nessuna conversione del testo
+        if isinstance(val, (int, float)):
+            return float(val)
         s = str(val).strip().replace("€", "").replace(" ", "")
         if not s:
             return 0.0
@@ -251,9 +272,16 @@ def parse_bank_statement(file_bytes, file_name, tipo_fonte="BANCA"):
         elif s.endswith("-"):
             s = "-" + s[:-1]
         if "." in s and "," in s:
-            s = s.replace(".", "").replace(",", ".")
+            # Il separatore che compare per ultimo è quello dei decimali (1.234,56 oppure 1,234.56)
+            if s.rfind(",") > s.rfind("."):
+                s = s.replace(".", "").replace(",", ".")
+            else:
+                s = s.replace(",", "")
         elif "," in s:
             s = s.replace(",", ".")
+        elif s.count(".") > 1 or (s.count(".") == 1 and len(s.split(".")[1]) == 3):
+            # Solo punti delle migliaia: 1.234 oppure 1.234.567 (gli importi hanno 2 decimali)
+            s = s.replace(".", "")
         try:
             return float(s)
         except ValueError:
@@ -374,7 +402,7 @@ if menu == "Dashboard & Alert Scadenze":
                 st.error(f"⛔ **{r['Calciatore']}** - CERTIFICATO SCADUTO IL {r['Scadenza']} (Non schierabile in gara)")
             else:
                 st.warning(f"⚠️ **{r['Calciatore']}** - Certificato in scadenza il {r['Scadenza']}")
-        st.dataframe(df_cert_alert, use_container_width=True)
+        st.dataframe(df_cert_alert, width="stretch")
     else:
         st.success("✅ Tutti i tesserati risultano con certificato medico agonistico in corso di validità.")
 
@@ -422,7 +450,7 @@ elif menu == "Soci, Atleti & Dirigenza":
             query_anag += " ORDER BY t.categoria, a.denominazione"
 
             df_anag_view = pd.read_sql_query(query_anag, conn, params=params)
-            st.dataframe(df_anag_view, use_container_width=True)
+            st.dataframe(df_anag_view, width="stretch")
         finally:
             conn.close()
 
@@ -503,7 +531,7 @@ elif menu == "Soci, Atleti & Dirigenza":
                 try:
                     df_import = pd.read_excel(uploaded_excel)
                     st.write("📋 **Anteprima dei dati rilevati nel file:**")
-                    st.dataframe(df_import.head(10), use_container_width=True)
+                    st.dataframe(df_import.head(10), width="stretch")
 
                     if st.button("🚀 Conferma Importazione Dati nel Database"):
                         count = 0
@@ -756,7 +784,7 @@ elif menu == "Ricevute Istituzionali (Art. 4)":
 
             conn = get_ro_conn()
             try:
-                next_num = conn.execute("SELECT COUNT(*) + 1 FROM ricevute_istituzionali WHERE strftime('%Y', data_emissione) = ?", [anno_ric]).fetchone()[0]
+                next_num = prossimo_numero(conn, "ricevute_istituzionali", "numero_ricevuta", "data_emissione", anno_ric)
             finally:
                 conn.close()
 
@@ -774,16 +802,20 @@ elif menu == "Ricevute Istituzionali (Art. 4)":
                 if importo > 0:
                     causale_completa = f"{tipo_causale} - {causale_custom}"
                     bollo = 2.00 if importo > 77.47 else 0.00
-                    cod_cassa_banca = "10.01.001" if pagamento == "BONIFICO" else ("10.01.003" if pagamento == "PAYPAL" else "10.01.002")
+                    # BONIFICO e POS vanno in banca, PAYPAL sul conto PayPal, CONTANTI in cassa
+                    cod_cassa_banca = {"BONIFICO": "10.01.001", "POS": "10.01.001", "PAYPAL": "10.01.003"}.get(pagamento, "10.01.002")
                     cod_ricavo = "50.01.001" if "Annua" in tipo_causale else "50.01.002"
 
                     try:
                         conn = get_ro_conn()
                         try:
+                            errore_num = controlla_numero_documento(conn, "ricevute_istituzionali", "numero_ricevuta", num_ric, data_ric.year)
                             acc_fin = get_conto_id(conn, cod_cassa_banca)
                             acc_ric = get_conto_id(conn, cod_ricavo)
                         finally:
                             conn.close()
+                        if errore_num:
+                            raise ValueError(errore_num)
 
                         with db_write() as w_conn:
                             w_conn.execute(
@@ -821,7 +853,7 @@ elif menu == "Ricevute Istituzionali (Art. 4)":
             """,
             conn
         )
-        st.dataframe(df_ric, use_container_width=True)
+        st.dataframe(df_ric, width="stretch")
     finally:
         conn.close()
 
@@ -867,7 +899,7 @@ elif menu == "Sponsor & Pubblicità (398/98)":
 
             conn = get_ro_conn()
             try:
-                next_fat_num = conn.execute("SELECT COUNT(*) + 1 FROM fatture_sponsor_398 WHERE strftime('%Y', data_fattura) = ?", [anno_fat]).fetchone()[0]
+                next_fat_num = prossimo_numero(conn, "fatture_sponsor_398", "numero_fattura", "data_fattura", anno_fat)
             finally:
                 conn.close()
 
@@ -884,10 +916,14 @@ elif menu == "Sponsor & Pubblicità (398/98)":
                         iva_totale = round(imponibile * (aliquota / 100), 2)
                         totale_fattura = round(imponibile + iva_totale, 2)
                         iva_da_versare_50 = round(iva_totale * 0.50, 2)
-                        stima_ires_3 = round(imponibile * 0.03, 2)
+                        # Legge 398/91: reddito imponibile forfettario = 3% dei proventi; IRES 24% su quel reddito (IRAP esclusa)
+                        stima_ires_3 = round(imponibile * 0.03 * 0.24, 2)
 
                         conn = get_ro_conn()
                         try:
+                            errore_num = controlla_numero_documento(conn, "fatture_sponsor_398", "numero_fattura", num_fat, data_fat.year)
+                            if errore_num:
+                                raise ValueError(errore_num)
                             acc_cred = get_conto_id(conn, "10.02.002")
                             acc_ric = get_conto_id(conn, "50.02.001")
                             acc_iva = get_conto_id(conn, "20.02.001")
@@ -921,14 +957,14 @@ elif menu == "Sponsor & Pubblicità (398/98)":
             """
             SELECT f.numero_fattura as N_Doc, f.data_fattura as Data, s.denominazione as Sponsor, 
                    f.imponibile as 'Imponibile (€)', f.iva_totale as 'IVA 22% (€)', f.totale_fattura as 'Totale (€)',
-                   f.iva_da_versare_50 as 'IVA 50% Erario (€)', f.stima_ires_3 as 'Stima IRES 3% (€)'
+                   f.iva_da_versare_50 as 'IVA 50% Erario (€)', f.stima_ires_3 as 'Stima IRES 24% su 3% (€)'
             FROM fatture_sponsor_398 f
             JOIN anagrafiche s ON f.sponsor_id = s.id
             ORDER BY f.id DESC
             """,
             conn
         )
-        st.dataframe(df_reg398, use_container_width=True)
+        st.dataframe(df_reg398, width="stretch")
     finally:
         conn.close()
 
@@ -1070,7 +1106,7 @@ elif menu == "Riconciliazione Estratti Conto":
                 edited_df = st.data_editor(
                     df_parsed,
                     num_rows="dynamic",
-                    use_container_width=True,
+                    width="stretch",
                     column_config={
                         "data_transazione": st.column_config.TextColumn("Data (YYYY-MM-DD)"),
                         "descrizione": st.column_config.TextColumn("Descrizione / Causale"),
@@ -1126,7 +1162,7 @@ elif menu == "Riconciliazione Estratti Conto":
             conn.close()
 
         if not df_db_saved.empty:
-            st.dataframe(df_db_saved, use_container_width=True)
+            st.dataframe(df_db_saved, width="stretch")
 
             st.divider()
             st.markdown("### ⚡ Operazioni di Riconciliazione o Elimina")
@@ -1257,7 +1293,7 @@ elif menu == "Prima Nota & Rendiconto ASD":
                 """,
                 conn
             )
-            st.dataframe(df_pn, use_container_width=True)
+            st.dataframe(df_pn, width="stretch")
         finally:
             conn.close()
 
@@ -1278,7 +1314,7 @@ elif menu == "Prima Nota & Rendiconto ASD":
                 """,
                 conn
             )
-            st.dataframe(df_rend, use_container_width=True)
+            st.dataframe(df_rend, width="stretch")
         finally:
             conn.close()
 
@@ -1307,6 +1343,6 @@ elif menu == "Piano dei Conti ASD":
     conn = get_ro_conn()
     try:
         df_pdc = pd.read_sql_query("SELECT codice, nome, tipo, livello FROM piano_dei_conti ORDER BY codice", conn)
-        st.dataframe(df_pdc, use_container_width=True)
+        st.dataframe(df_pdc, width="stretch")
     finally:
         conn.close()
