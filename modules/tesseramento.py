@@ -98,7 +98,7 @@ def leggi_csv_tesseramento(file_bytes):
 def calcola_piano(df_export, df_anag, df_cert):
     """Confronta export e gestionale senza scrivere nulla.
 
-    df_anag: colonne id, denominazione, codice_fiscale, tid, matricola_figc, stato
+    df_anag: colonne id, denominazione, codice_fiscale, tid, numero_tessera, stato
     df_cert: colonne anagrafica_id, scad (ultima scadenza registrata)
     Restituisce (righe_piano, solo_gestionale).
     """
@@ -119,7 +119,7 @@ def calcola_piano(df_export, df_anag, df_cert):
         if r is not None:
             abbinati.add(int(r["id"]))
 
-        tessera_att = str((r or {}).get("matricola_figc") or "").strip()
+        tessera_att = str((r or {}).get("numero_tessera") or "").strip()
         cf_att = norm((r or {}).get("codice_fiscale"))
         scad_att = ultima_scad.get(int(r["id"])) if r is not None else None
         piano.append({
@@ -217,7 +217,7 @@ def applica_piano(conn, piano, opzioni, inattivare_ids=(), categoria_nuovi="PRIM
                 [p["nome_file"], cf, u["email"]]
             ).lastrowid
             conn.execute(
-                "INSERT INTO tesserati_calcio (anagrafica_id, matricola_figc, categoria, ruolo, data_tesseramento, gioca) VALUES (?, ?, ?, 'Calciatore', ?, 1)",
+                "INSERT INTO tesserati_calcio (anagrafica_id, numero_tessera, categoria, ruolo, data_tesseramento, gioca) VALUES (?, ?, ?, 'Calciatore', ?, 1)",
                 [int(anag_id), u["tessera"], categoria_nuovi, u["data_emissione"] or datetime.date.today().isoformat()]
             )
             if u["scad_cert"]:
@@ -227,7 +227,7 @@ def applica_piano(conn, piano, opzioni, inattivare_ids=(), categoria_nuovi="PRIM
                 )
             continue
         if "tessera" in azioni:
-            conn.execute("UPDATE tesserati_calcio SET matricola_figc = ? WHERE id = ?", [u["tessera"], p["tesserato_id"]])
+            conn.execute("UPDATE tesserati_calcio SET numero_tessera = ? WHERE id = ?", [u["tessera"], p["tesserato_id"]])
         if "cf" in azioni:
             conn.execute("UPDATE anagrafiche SET codice_fiscale = ? WHERE id = ?", [u["cf"], p["anagrafica_id"]])
         if "cert" in azioni:
