@@ -50,8 +50,8 @@ PIANO_DEI_CONTI_ASD = [
     # 40. COSTI ED USCITE GESTIONALI
     # ----------------------------------------------------------------------
     ('40', 'COSTI DELLA GESTIONE SPORTIVA ED AMMINISTRATIVA', 'COSTO', 1),
-    ('40.01', 'Costi Attività Calcio a 11 (FIGC / LND / EPS)', 'COSTO', 2),
-    ('40.01.001', 'Tasse Iscrizione Campionato e Coppe FIGC/LND', 'COSTO', 3),
+    ('40.01', 'Costi Attività Calcio a 11 (Federazione / Enti)', 'COSTO', 2),
+    ('40.01.001', 'Tasse Iscrizione Campionato e Coppe', 'COSTO', 3),
     ('40.01.002', 'Affitto Campi da Gioco e Impianti Sportivi', 'COSTO', 3),
     ('40.01.003', 'Tasse Gara e Terzetti Arbitrali', 'COSTO', 3),
     ('40.01.004', 'Acquisto Divise, Palloni e Abbigliamento Tecnico', 'COSTO', 3),

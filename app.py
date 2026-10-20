@@ -6,6 +6,7 @@ import sqlite3
 import pandas as pd
 import streamlit as st
 from contextlib import contextmanager
+from modules import tesseramento
 from modules.db import PIANO_DEI_CONTI_ASD, get_connection, init_db, usa_turso
 
 # ---------------------------------------------------------
@@ -27,6 +28,12 @@ try:
     APP_TITLE = st.secrets.get("APP_TITLE", "Gestionale A.S.D. Calcio a 11 - Regime Legge 398/91")
 except Exception:
     APP_TITLE = "Gestionale A.S.D. Calcio a 11 - Regime Legge 398/91"
+
+# Nome dell'ente di tesseramento (federazione o ente di promozione) mostrato nelle etichette: impostabile nei Secrets
+try:
+    ENTE_TESSERAMENTO = st.secrets.get("ENTE_TESSERAMENTO", "Ente di Tesseramento")
+except Exception:
+    ENTE_TESSERAMENTO = "Ente di Tesseramento"
 
 st.set_page_config(page_title=APP_TITLE, layout="wide", page_icon="⚽")
 
@@ -564,6 +571,77 @@ elif menu == "Soci, Atleti & Dirigenza":
                         except Exception as ex:
                             st.error(f"Errore durante l'inserimento dell'anagrafica: {ex}")
 
+        with st.expander(f"🔄 Aggiorna da Export Tesserati {ENTE_TESSERAMENTO} (.csv)"):
+            st.caption(
+                f"Carica il CSV dei tesserati esportato dal portale {ENTE_TESSERAMENTO}. Gli abbinamenti avvengono per codice fiscale "
+                "(o per cognome e nome se il codice manca). Vedrai un'anteprima: nulla viene salvato finché non confermi."
+            )
+            file_export = st.file_uploader("File CSV tesserati", type=["csv"], key="file_export_tesserati")
+
+            if file_export is not None:
+                try:
+                    df_export = tesseramento.leggi_csv_tesseramento(file_export.getvalue())
+                    conn = get_ro_conn()
+                    try:
+                        df_anag_u = pd.read_sql_query(
+                            "SELECT a.id, a.denominazione, a.codice_fiscale, t.id AS tid, t.matricola_figc, t.stato "
+                            "FROM anagrafiche a LEFT JOIN tesserati_calcio t ON t.anagrafica_id = a.id "
+                            "WHERE a.tipo IN ('SOCIO_CALCIATORE', 'ALTRO')",
+                            conn
+                        )
+                        df_cert_u = pd.read_sql_query(
+                            "SELECT anagrafica_id, MAX(data_scadenza) AS scad FROM certificati_medici GROUP BY anagrafica_id", conn
+                        )
+                    finally:
+                        conn.close()
+
+                    piano, solo_gestionale = tesseramento.calcola_piano(df_export, df_anag_u, df_cert_u)
+                    st.write(f"📋 Nel file: **{len(df_export)}** tesserati {ENTE_TESSERAMENTO}.")
+
+                    o1, o2 = st.columns(2)
+                    opzioni = {
+                        "tessere": o1.checkbox("Compila i numeri tessera mancanti", value=True),
+                        "sostituisci_tessere": o1.checkbox("Sostituisci anche i numeri tessera diversi (nuova stagione)", value=False),
+                        "cf": o1.checkbox("Correggi / completa i codici fiscali con quelli del file", value=True),
+                        "certificati": o2.checkbox("Aggiungi le scadenze certificato più recenti", value=True),
+                        "nuovi": o2.checkbox("Aggiungi i tesserati del file non presenti nel gestionale", value=True),
+                        "riattiva": o2.checkbox("Riattiva chi risulta INATTIVO ma è nel file", value=True),
+                    }
+                    categoria_nuovi = "PRIMA_SQUADRA"
+                    if opzioni["nuovi"]:
+                        categoria_nuovi = st.selectbox("Categoria per i nuovi tesserati", CATEGORIE_LISTA, index=CATEGORIE_LISTA.index("PRIMA_SQUADRA"))
+
+                    inattivare_ids = []
+                    if solo_gestionale:
+                        etichette = {f"{r['denominazione']} (CF: {r['codice_fiscale'] or 'N.D.'})": int(r["tid"]) for r in solo_gestionale}
+                        scelti = st.multiselect(
+                            f"Tesserati attivi del gestionale NON presenti nel file ({len(solo_gestionale)}): seleziona chi segnare come INATTIVO (mancato rinnovo)",
+                            list(etichette.keys())
+                        )
+                        inattivare_ids = [etichette[s] for s in scelti]
+
+                    st.markdown("**Anteprima delle modifiche**")
+                    st.dataframe(tesseramento.descrivi_piano(piano, opzioni), width="stretch", hide_index=True)
+
+                    n = tesseramento.conta_azioni(piano, opzioni, inattivare_ids)
+                    st.info(
+                        f"Tessere: **{n['tessera']}** · Codici fiscali: **{n['cf']}** · Certificati: **{n['cert']}** · "
+                        f"Nuovi tesserati: **{n['nuovo']}** · Riattivati: **{n['riattiva']}** · Inattivati: **{n['inattiva']}**"
+                    )
+
+                    if sum(n.values()) == 0:
+                        st.success("✅ Nessuna modifica da applicare: il gestionale è già allineato al file.")
+                    elif st.button("✅ Conferma e salva le modifiche"):
+                        try:
+                            with db_write() as w_conn:
+                                tesseramento.applica_piano(w_conn, piano, opzioni, inattivare_ids, categoria_nuovi)
+                            st.session_state["flash"] = "Dati tesserati salvati: " + ", ".join(f"{k} {v}" for k, v in n.items() if v)
+                            st.rerun()
+                        except Exception as ex_u:
+                            st.error(f"Errore durante il salvataggio: nessuna modifica è stata salvata. Dettaglio: {ex_u}")
+                except ValueError as ex_csv:
+                    st.error(f"⚠️ {ex_csv}")
+
         with st.expander("📥 Importazione Massiva da File Excel (.xlsx)"):
             buffer = io.BytesIO()
             df_template_demo = pd.DataFrame([{
@@ -616,7 +694,7 @@ elif menu == "Soci, Atleti & Dirigenza":
                                             errors.append(f"Riga {i+2}: Codice Fiscale {cf} già esistente.")
                                             continue
 
-                                    matricola_val = row.get("Matricola_Tessera_N") if pd.notna(row.get("Matricola_Tessera_N")) else row.get("Matricola_FIGC", "")
+                                    matricola_val = row.get("Matricola_Tessera_N", "")
                                     matricola = str(matricola_val).strip() if pd.notna(matricola_val) else ""
 
                                     cat_imported = str(row.get("Categoria", "STAFF")).strip() if pd.notna(row.get("Categoria")) else "STAFF"
@@ -1133,8 +1211,8 @@ elif menu == "Lavoro Sportivo & Rimborsi (D.Lgs. 36)":
 
                 r1, r2, r3 = st.columns(3)
                 data_partita = r1.date_input("Data Partita di Campionato")
-                incontro = r2.text_input("Incontro / Gara", value="ASD Ameglia vs Spezia Calcio")
-                luogo = r3.text_input("Luogo Trasferta", value="La Spezia")
+                incontro = r2.text_input("Incontro / Gara", value="Squadra Casa vs Squadra Ospite")
+                luogo = r3.text_input("Luogo Trasferta")
 
                 r4, r5, r6 = st.columns(3)
                 km = r4.number_input("Km Percorsi", min_value=0.0)

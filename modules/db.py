@@ -33,7 +33,7 @@ PIANO_DEI_CONTI_ASD = [
     ('40', 'COSTI PER ATTIVITÀ SPORTIVA E GESTIONE', 'COSTO', 1),
     ('40.01', 'Costi Attività Sportiva Calcio', 'COSTO', 2),
     ('40.01.001', 'Compensi e Rimborsi Staff Tecnico', 'COSTO', 3),
-    ('40.01.002', 'Tasse Affiliazione e Tesseramenti FIGC/LND', 'COSTO', 3),
+    ('40.01.002', 'Tasse Affiliazione e Tesseramenti Federazione/Ente', 'COSTO', 3),
     ('40.01.003', 'Materiale Sportivo e Abbigliamento Gara', 'COSTO', 3),
     ('40.01.004', 'Affitto Campi e Strutture Sportive', 'COSTO', 3),
     ('40.01.005', 'Spese Sanitarie e Visite Mediche', 'COSTO', 3),
