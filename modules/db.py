@@ -156,6 +156,7 @@ def init_db():
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         anagrafica_id INTEGER NOT NULL REFERENCES anagrafiche(id) ON DELETE CASCADE,
         numero_tessera TEXT,
+        numero_scheda_attivita TEXT,
         categoria TEXT CHECK(categoria IN ('PRIMA_SQUADRA', 'JUNIORES', 'ALLIEVI', 'GIOVANISSIMI', 'SCUOLA_CALCIO', 'STAFF')),
         ruolo TEXT,
         data_tesseramento TEXT,
@@ -170,6 +171,12 @@ def init_db():
         cursor.execute("ALTER TABLE tesserati_calcio RENAME COLUMN matricola_figc TO numero_tessera;")
     except Exception:
         pass  # colonna già rinominata o database nuovo
+
+    # Migrazione: secondo numero di tesseramento (scheda attività, es. dirigente che gioca)
+    try:
+        cursor.execute("ALTER TABLE tesserati_calcio ADD COLUMN numero_scheda_attivita TEXT;")
+    except Exception:
+        pass  # colonna già presente
 
     # Migrazione: colonna "gioca" (1 = svolge attività sportiva, certificato medico obbligatorio).
     # Se la colonna manca viene aggiunta e lo STAFF già presente viene impostato come "non gioca".

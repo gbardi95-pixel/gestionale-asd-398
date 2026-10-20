@@ -91,14 +91,36 @@ def leggi_csv_tesseramento(file_bytes):
         r["scad_cert"] = _data_iso(r.get("scad_cert"))
         r.setdefault("email", "")
         r.setdefault("tipo_cert", "")
+        r["scheda"] = ""
         record.append(r)
-    return pd.DataFrame(record, columns=["cognome", "nome", "cf", "email", "tessera", "data_emissione", "scad_cert", "tipo_cert"])
+    return pd.DataFrame(_unisci_doppioni(record), columns=["cognome", "nome", "cf", "email", "tessera", "scheda", "data_emissione", "scad_cert", "tipo_cert"])
+
+
+def _unisci_doppioni(record):
+    """Stessa persona (stesso CF) su due righe, es. dirigente che gioca: il numero più basso è la tessera,
+    il più alto la scheda attività. La scadenza certificato tenuta è la più recente."""
+    per_cf, uniti = {}, []
+    for r in record:
+        if not r["cf"]:
+            uniti.append(r)
+            continue
+        if r["cf"] not in per_cf:
+            per_cf[r["cf"]] = r
+            uniti.append(r)
+            continue
+        base = per_cf[r["cf"]]
+        numeri = sorted({n for n in (base["tessera"], base["scheda"], r["tessera"]) if n}, key=lambda n: (len(n), n))
+        base["tessera"], base["scheda"] = numeri[0], (numeri[-1] if len(numeri) > 1 else "")
+        if r["scad_cert"] > base["scad_cert"]:
+            base["scad_cert"], base["tipo_cert"] = r["scad_cert"], r["tipo_cert"]
+        base["email"] = base["email"] or r["email"]
+    return uniti
 
 
 def calcola_piano(df_export, df_anag, df_cert):
     """Confronta export e gestionale senza scrivere nulla.
 
-    df_anag: colonne id, denominazione, codice_fiscale, tid, numero_tessera, stato
+    df_anag: colonne id, denominazione, codice_fiscale, tid, numero_tessera, numero_scheda_attivita, stato
     df_cert: colonne anagrafica_id, scad (ultima scadenza registrata)
     Restituisce (righe_piano, solo_gestionale).
     """
@@ -130,6 +152,7 @@ def calcola_piano(df_export, df_anag, df_cert):
             "persona": r["denominazione"] if r is not None else nome_u,
             "abbinamento": via,
             "tessera_attuale": tessera_att,
+            "scheda_attuale": str((r or {}).get("numero_scheda_attivita") or "").strip(),
             "cf_attuale": cf_att,
             "cf_file_valido": cf_valido(u["cf"]),
             "scad_attuale": scad_att or "",
@@ -148,11 +171,13 @@ def descrivi_piano(piano, opzioni):
         u = p["export"]
         azioni = _azioni(p, opzioni)
         if "nuovo" in azioni:
-            azioni = {"tessera"} | ({"cf"} if p["cf_file_valido"] else set()) | ({"cert"} if u["scad_cert"] else set())
+            azioni = ({"tessera"} | ({"scheda"} if u["scheda"] else set()) | ({"cf"} if p["cf_file_valido"] else set())
+                      | ({"cert"} if u["scad_cert"] else set()))
         righe.append({
             "Persona": p["persona"],
             "Abbinato per": p["abbinamento"],
             "Tessera": _freccia(p["tessera_attuale"], u["tessera"]) if "tessera" in azioni else (p["tessera_attuale"] or "—"),
+            "Scheda attività": _freccia(p["scheda_attuale"], u["scheda"]) if "scheda" in azioni else (p["scheda_attuale"] or "—"),
             "Codice fiscale": _freccia(p["cf_attuale"], u["cf"]) if "cf" in azioni else (p["cf_attuale"] or u["cf"] or "—"),
             "Certificato": _freccia(p["scad_attuale"], u["scad_cert"]) if "cert" in azioni else (p["scad_attuale"] or "—"),
             "Note": "; ".join(_note(p, opzioni)),
@@ -172,6 +197,10 @@ def _note(p, opzioni):
         note.append("Non presente nel gestionale: non verrà aggiunto")
     if p["tessera_attuale"] and p["tessera_attuale"] != u["tessera"] and not opzioni.get("sostituisci_tessere"):
         note.append("Tessera diversa: non sostituita")
+    if p["scheda_attuale"] and u["scheda"] and p["scheda_attuale"] != u["scheda"] and not opzioni.get("sostituisci_tessere"):
+        note.append("Scheda attività diversa: non sostituita")
+    if u["scheda"]:
+        note.append("Due tesseramenti nel file: tessera + scheda attività")
     if p["stato_attuale"] == "INATTIVO" and opzioni.get("riattiva"):
         note.append("Verrà riattivato")
     if not u["scad_cert"]:
@@ -187,6 +216,9 @@ def _azioni(p, opzioni):
     if opzioni.get("tessere") and u["tessera"] and p["tesserato_id"] is not None:
         if not p["tessera_attuale"] or (opzioni.get("sostituisci_tessere") and p["tessera_attuale"] != u["tessera"]):
             azioni.add("tessera")
+    if opzioni.get("tessere") and u["scheda"] and p["tesserato_id"] is not None:
+        if not p["scheda_attuale"] or (opzioni.get("sostituisci_tessere") and p["scheda_attuale"] != u["scheda"]):
+            azioni.add("scheda")
     if opzioni.get("cf") and p["cf_file_valido"] and u["cf"] != p["cf_attuale"]:
         azioni.add("cf")
     if opzioni.get("certificati") and u["scad_cert"] and u["scad_cert"] > (p["scad_attuale"] or ""):
@@ -197,7 +229,7 @@ def _azioni(p, opzioni):
 
 
 def conta_azioni(piano, opzioni, inattivare_ids=()):
-    conteggi = {"tessera": 0, "cf": 0, "cert": 0, "nuovo": 0, "riattiva": 0}
+    conteggi = {"tessera": 0, "scheda": 0, "cf": 0, "cert": 0, "nuovo": 0, "riattiva": 0}
     for p in piano:
         for a in _azioni(p, opzioni):
             conteggi[a] += 1
@@ -217,8 +249,8 @@ def applica_piano(conn, piano, opzioni, inattivare_ids=(), categoria_nuovi="PRIM
                 [p["nome_file"], cf, u["email"]]
             ).lastrowid
             conn.execute(
-                "INSERT INTO tesserati_calcio (anagrafica_id, numero_tessera, categoria, ruolo, data_tesseramento, gioca) VALUES (?, ?, ?, 'Calciatore', ?, 1)",
-                [int(anag_id), u["tessera"], categoria_nuovi, u["data_emissione"] or datetime.date.today().isoformat()]
+                "INSERT INTO tesserati_calcio (anagrafica_id, numero_tessera, numero_scheda_attivita, categoria, ruolo, data_tesseramento, gioca) VALUES (?, ?, ?, ?, 'Calciatore', ?, 1)",
+                [int(anag_id), u["tessera"], u["scheda"], categoria_nuovi, u["data_emissione"] or datetime.date.today().isoformat()]
             )
             if u["scad_cert"]:
                 conn.execute(
@@ -228,6 +260,8 @@ def applica_piano(conn, piano, opzioni, inattivare_ids=(), categoria_nuovi="PRIM
             continue
         if "tessera" in azioni:
             conn.execute("UPDATE tesserati_calcio SET numero_tessera = ? WHERE id = ?", [u["tessera"], p["tesserato_id"]])
+        if "scheda" in azioni:
+            conn.execute("UPDATE tesserati_calcio SET numero_scheda_attivita = ? WHERE id = ?", [u["scheda"], p["tesserato_id"]])
         if "cf" in azioni:
             conn.execute("UPDATE anagrafiche SET codice_fiscale = ? WHERE id = ?", [u["cf"], p["anagrafica_id"]])
         if "cert" in azioni:

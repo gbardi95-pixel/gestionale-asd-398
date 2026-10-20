@@ -14,7 +14,7 @@ from modules.db import PIANO_DEI_CONTI_ASD, get_connection, init_db, usa_turso
 # ---------------------------------------------------------
 # Incrementare a ogni modifica dello schema del DB: forza init_db() (e le migrazioni)
 # anche quando Streamlit Cloud aggiorna il codice senza riavviare il server.
-VERSIONE_SCHEMA_DB = 3
+VERSIONE_SCHEMA_DB = 4
 
 @st.cache_resource
 def _setup_database(versione_schema):
@@ -463,6 +463,7 @@ elif menu == "Soci, Atleti & Dirigenza":
                        t.ruolo as Ruolo, 
                        a.codice_fiscale as 'Codice Fiscale',
                        t.numero_tessera as 'Matricola/Tessera N°', 
+                       t.numero_scheda_attivita as 'N° Scheda Attività', 
                        t.quota_stagionale as 'Quota Dovuta (€)',
                        CASE WHEN t.gioca = 1 THEN 'Sì' ELSE 'No' END as Gioca,
                        CASE WHEN t.gioca = 1 THEN COALESCE(c.data_scadenza, 'MANCANTE') ELSE 'Non richiesto' END as 'Scadenza Medico',
@@ -584,7 +585,7 @@ elif menu == "Soci, Atleti & Dirigenza":
                     conn = get_ro_conn()
                     try:
                         df_anag_u = pd.read_sql_query(
-                            "SELECT a.id, a.denominazione, a.codice_fiscale, t.id AS tid, t.numero_tessera, t.stato "
+                            "SELECT a.id, a.denominazione, a.codice_fiscale, t.id AS tid, t.numero_tessera, t.numero_scheda_attivita, t.stato "
                             "FROM anagrafiche a LEFT JOIN tesserati_calcio t ON t.anagrafica_id = a.id "
                             "WHERE a.tipo IN ('SOCIO_CALCIATORE', 'ALTRO')",
                             conn
@@ -765,7 +766,7 @@ elif menu == "Soci, Atleti & Dirigenza":
             conn = get_ro_conn()
             try:
                 df_a = pd.read_sql_query("SELECT denominazione, codice_fiscale FROM anagrafiche WHERE id = ?", conn, params=[selected_anag_id])
-                df_t = pd.read_sql_query("SELECT numero_tessera, categoria, ruolo, quota_stagionale, stato, gioca FROM tesserati_calcio WHERE anagrafica_id = ?", conn, params=[selected_anag_id])
+                df_t = pd.read_sql_query("SELECT numero_tessera, numero_scheda_attivita, categoria, ruolo, quota_stagionale, stato, gioca FROM tesserati_calcio WHERE anagrafica_id = ?", conn, params=[selected_anag_id])
                 df_c = pd.read_sql_query("SELECT data_rilascio, data_scadenza, medico_certificatore FROM certificati_medici WHERE anagrafica_id = ? ORDER BY data_scadenza DESC", conn, params=[selected_anag_id])
             finally:
                 conn.close()
@@ -775,6 +776,7 @@ elif menu == "Soci, Atleti & Dirigenza":
 
             has_tess = not df_t.empty
             cur_matricola = first_val(df_t, "numero_tessera")
+            cur_scheda = first_val(df_t, "numero_scheda_attivita")
             cur_cat_raw = first_val(df_t, "categoria", "STAFF")
             cur_cat = cur_cat_raw if cur_cat_raw in CATEGORIE_LISTA else "STAFF"
             cur_role = first_val(df_t, "ruolo", "Dirigente")
@@ -793,6 +795,7 @@ elif menu == "Soci, Atleti & Dirigenza":
                 e_nome = e_col1.text_input("Cognome e Nome*", value=cur_nome)
                 e_cf = e_col2.text_input("Codice Fiscale", value=cur_cf)
                 e_matricola = e_col3.text_input("Matricola/Tessera N°", value=cur_matricola)
+                e_scheda = st.text_input("N° Scheda Attività (secondo tesseramento, es. dirigente che gioca)", value=cur_scheda)
 
                 e_col4, e_col5, e_col6 = st.columns(3)
                 cat_idx = CATEGORIE_LISTA.index(cur_cat) if cur_cat in CATEGORIE_LISTA else 0
@@ -841,14 +844,14 @@ elif menu == "Soci, Atleti & Dirigenza":
 
                             if has_tess:
                                 w_conn.execute(
-                                    "UPDATE tesserati_calcio SET numero_tessera = ?, categoria = ?, ruolo = ?, quota_stagionale = ?, stato = ?, gioca = ? WHERE anagrafica_id = ?",
-                                    [str(e_matricola).strip(), str(e_categoria), str(e_ruolo), float(e_quota), str(e_stato), int(e_gioca), int(selected_anag_id)]
+                                    "UPDATE tesserati_calcio SET numero_tessera = ?, numero_scheda_attivita = ?, categoria = ?, ruolo = ?, quota_stagionale = ?, stato = ?, gioca = ? WHERE anagrafica_id = ?",
+                                    [str(e_matricola).strip(), str(e_scheda).strip(), str(e_categoria), str(e_ruolo), float(e_quota), str(e_stato), int(e_gioca), int(selected_anag_id)]
                                 )
                             else:
                                 w_conn.execute(
-                                    "INSERT INTO tesserati_calcio (anagrafica_id, numero_tessera, categoria, ruolo, data_tesseramento, quota_stagionale, stato, gioca) "
-                                    "VALUES (?, ?, ?, ?, strftime('%Y-%m-%d', 'now'), ?, ?, ?)",
-                                    [int(selected_anag_id), str(e_matricola).strip(), str(e_categoria), str(e_ruolo), float(e_quota), str(e_stato), int(e_gioca)]
+                                    "INSERT INTO tesserati_calcio (anagrafica_id, numero_tessera, numero_scheda_attivita, categoria, ruolo, data_tesseramento, quota_stagionale, stato, gioca) "
+                                    "VALUES (?, ?, ?, ?, ?, strftime('%Y-%m-%d', 'now'), ?, ?, ?)",
+                                    [int(selected_anag_id), str(e_matricola).strip(), str(e_scheda).strip(), str(e_categoria), str(e_ruolo), float(e_quota), str(e_stato), int(e_gioca)]
                                 )
 
                             if e_data_scad:
