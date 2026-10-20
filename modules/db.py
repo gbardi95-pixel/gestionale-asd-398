@@ -1,5 +1,6 @@
 import os
 import sqlite3
+import time
 import streamlit as st
 
 # Piano dei Conti predefinito per ASD Calcio a 11 (Legge 398/98)
@@ -51,8 +52,8 @@ PIANO_DEI_CONTI_ASD = [
 ]
 
 
-def get_connection():
-    """Stabilisce la connessione al database Turso Cloud DB (o SQLite locale)."""
+def _turso_credentials():
+    """Legge URL e token Turso da st.secrets o, in alternativa, dalle variabili d'ambiente."""
     turso_url = None
     turso_token = None
 
@@ -67,13 +68,39 @@ def get_connection():
         turso_url = os.environ.get("TURSO_DATABASE_URL")
         turso_token = os.environ.get("TURSO_AUTH_TOKEN")
 
+    return turso_url, turso_token
+
+
+def usa_turso():
+    """True se sono configurate le credenziali Turso (database di produzione)."""
+    turso_url, turso_token = _turso_credentials()
+    return bool(turso_url and turso_token)
+
+
+def get_connection():
+    """Stabilisce la connessione al database Turso Cloud DB (o SQLite locale se Turso non è configurato).
+
+    Se Turso è configurato ma non raggiungibile, l'app si ferma: non ripiega mai
+    sul file locale, che su Streamlit Cloud verrebbe cancellato al riavvio.
+    """
+    turso_url, turso_token = _turso_credentials()
+
     if turso_url and turso_token:
-        try:
-            import libsql
-            conn = libsql.connect(database=turso_url, auth_token=turso_token)
-            return conn
-        except Exception as e:
-            st.error(f"Errore di connessione a Turso Cloud DB: {e}")
+        import libsql
+
+        ultimo_errore = None
+        for tentativo in range(3):
+            try:
+                return libsql.connect(database=turso_url, auth_token=turso_token)
+            except Exception as e:
+                ultimo_errore = e
+                time.sleep(2 ** tentativo)
+        st.error(
+            "❌ Impossibile collegarsi al database Turso dopo 3 tentativi. "
+            "Nessun dato è stato salvato: riprova tra qualche minuto.\n\n"
+            f"Dettaglio: {ultimo_errore}"
+        )
+        st.stop()
 
     os.makedirs("data", exist_ok=True)
     db_path = os.path.join("data", "contabilita_asd.db")

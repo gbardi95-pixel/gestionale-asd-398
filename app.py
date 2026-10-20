@@ -1,11 +1,12 @@
 import datetime
+import hmac
 import io
 import os
 import sqlite3
 import pandas as pd
 import streamlit as st
 from contextlib import contextmanager
-from modules.db import PIANO_DEI_CONTI_ASD, get_connection, init_db
+from modules.db import PIANO_DEI_CONTI_ASD, get_connection, init_db, usa_turso
 
 # ---------------------------------------------------------
 # INIZIALIZZAZIONE & CACHING RESOURCE DB
@@ -24,6 +25,43 @@ except Exception:
     APP_TITLE = "Gestionale A.S.D. Calcio a 11 - Regime Legge 398/98"
 
 st.set_page_config(page_title=APP_TITLE, layout="wide", page_icon="⚽")
+
+# ---------------------------------------------------------
+# ACCESSO CON PASSWORD (APP_PASSWORD nei Secrets di Streamlit)
+# ---------------------------------------------------------
+def _verifica_accesso():
+    try:
+        password_attesa = st.secrets.get("APP_PASSWORD")
+    except Exception:
+        password_attesa = None
+    password_attesa = password_attesa or os.environ.get("APP_PASSWORD")
+
+    if not password_attesa:
+        st.error("🔒 Accesso bloccato: imposta APP_PASSWORD nei Secrets dell'app su Streamlit.")
+        st.stop()
+
+    if st.session_state.get("autenticato"):
+        return
+
+    st.title(f"⚽ {APP_TITLE}")
+    with st.form("login"):
+        pwd = st.text_input("Password", type="password")
+        if st.form_submit_button("Entra"):
+            if hmac.compare_digest(pwd.encode("utf-8"), str(password_attesa).encode("utf-8")):
+                st.session_state["autenticato"] = True
+                st.rerun()
+            else:
+                st.error("Password errata.")
+    st.stop()
+
+_verifica_accesso()
+
+if st.sidebar.button("🚪 Esci"):
+    st.session_state.pop("autenticato", None)
+    st.rerun()
+
+if not usa_turso():
+    st.sidebar.warning("⚠️ Turso non configurato: stai usando un database LOCALE di prova.")
 
 # Gestione Notifiche Flash
 if "flash" in st.session_state:
@@ -115,7 +153,7 @@ def post_journal(conn, data_reg, num_doc, causale, tipo_att, righe):
         conn.execute(
             "INSERT INTO righe_prima_nota (movimento_id, sottoconto_id, descrizione, dare, avere) "
             "VALUES (?, ?, ?, ?, ?)",
-            [int(acc_id), int(mov_id), str(desc).strip(), float(dare), float(avere)]
+            [int(mov_id), int(acc_id), str(desc).strip(), float(dare), float(avere)]
         )
 
 # ---------------------------------------------------------

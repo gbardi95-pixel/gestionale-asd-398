@@ -1,0 +1,19 @@
+# Credenziali e configurazioni locali
+.env
+.streamlit/secrets.toml
+
+# Dati personali (soci, tesserati) e database locali
+*.xlsx
+*.xls
+*.csv
+data/
+*.db
+
+# Script di importazione locali (contengono credenziali)
+import_libro_soci.py
+import_libro_soci_http.py
+
+# Ambiente Python
+.venv/
+__pycache__/
+*.pyc
