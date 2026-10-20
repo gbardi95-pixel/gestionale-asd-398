@@ -20,9 +20,9 @@ _setup_database()
 
 # Titolo dinamico da Secrets
 try:
-    APP_TITLE = st.secrets.get("APP_TITLE", "Gestionale A.S.D. Calcio a 11 - Regime Legge 398/98")
+    APP_TITLE = st.secrets.get("APP_TITLE", "Gestionale A.S.D. Calcio a 11 - Regime Legge 398/91")
 except Exception:
-    APP_TITLE = "Gestionale A.S.D. Calcio a 11 - Regime Legge 398/98"
+    APP_TITLE = "Gestionale A.S.D. Calcio a 11 - Regime Legge 398/91"
 
 st.set_page_config(page_title=APP_TITLE, layout="wide", page_icon="⚽")
 
@@ -79,7 +79,7 @@ menu = st.sidebar.radio(
         "Dashboard & Alert Scadenze",
         "Soci, Atleti & Dirigenza",
         "Ricevute Istituzionali (Art. 4)",
-        "Sponsor & Pubblicità (398/98)",
+        "Sponsor & Pubblicità (398/91)",
         "Lavoro Sportivo & Rimborsi (D.Lgs. 36)",
         "Riconciliazione Estratti Conto",
         "Prima Nota & Rendiconto ASD",
@@ -131,6 +131,16 @@ def first_val(df, col, default=""):
     if df.empty or col not in df.columns or pd.isna(df[col].iloc[0]):
         return default
     return df[col].iloc[0]
+
+def data_iso(val):
+    """Converte una data da Excel (data, 31/05/2027 o 2027-05-31) nel formato AAAA-MM-GG; stringa vuota se assente o non valida."""
+    if val is None or (not isinstance(val, str) and pd.isna(val)) or not str(val).strip():
+        return ""
+    if isinstance(val, (datetime.date, datetime.datetime, pd.Timestamp)):
+        return pd.Timestamp(val).strftime("%Y-%m-%d")
+    s = str(val).strip()
+    parsed = pd.to_datetime(s[:10], format="%Y-%m-%d", errors="coerce") if len(s) >= 10 and s[4] == "-" else pd.to_datetime(s, dayfirst=True, errors="coerce")
+    return parsed.strftime("%Y-%m-%d") if pd.notna(parsed) else ""
 
 def prossimo_numero(conn, tabella, col_numero, col_data, anno):
     """Prossimo progressivo dell'anno: il numero più alto già usato + 1 (non il conteggio, che crea doppioni se si cancella un documento)."""
@@ -348,17 +358,21 @@ if menu == "Dashboard & Alert Scadenze":
 
     conn = get_ro_conn()
     try:
+        # Solo chi gioca (tesserato attivo) ha l'obbligo del certificato: mancante, scaduto o in scadenza entro 30 giorni
         df_cert_alert = pd.read_sql_query(
             """
-            SELECT a.denominazione as 'Calciatore', c.tipo, c.data_scadenza as 'Scadenza', c.stato_idoneita
-            FROM (
+            SELECT a.denominazione as 'Tesserato', t.categoria as Categoria, t.ruolo as Ruolo,
+                   c.tipo as Tipo, c.data_scadenza as 'Scadenza', c.stato_idoneita as Idoneità
+            FROM tesserati_calcio t
+            JOIN anagrafiche a ON t.anagrafica_id = a.id
+            LEFT JOIN (
                 SELECT anagrafica_id, MAX(data_scadenza) as data_scadenza, tipo, stato_idoneita
                 FROM certificati_medici
                 GROUP BY anagrafica_id
-            ) c
-            JOIN anagrafiche a ON c.anagrafica_id = a.id
-            WHERE c.data_scadenza <= ?
-            ORDER BY c.data_scadenza ASC
+            ) c ON c.anagrafica_id = a.id
+            WHERE t.gioca = 1 AND t.stato = 'ATTIVO'
+              AND (c.data_scadenza IS NULL OR c.data_scadenza <= ?)
+            ORDER BY c.data_scadenza IS NOT NULL, c.data_scadenza ASC, a.denominazione
             """,
             conn,
             params=[in_30_days]
@@ -366,6 +380,9 @@ if menu == "Dashboard & Alert Scadenze":
 
         num_tesserati = pd.read_sql_query(
             "SELECT COUNT(*) as tot FROM tesserati_calcio WHERE stato='ATTIVO'", conn
+        )["tot"].iloc[0]
+        num_giocatori = pd.read_sql_query(
+            "SELECT COUNT(*) as tot FROM tesserati_calcio WHERE stato='ATTIVO' AND gioca = 1", conn
         )["tot"].iloc[0]
 
         tot_sponsor = pd.read_sql_query(
@@ -389,22 +406,25 @@ if menu == "Dashboard & Alert Scadenze":
         conn.close()
 
     k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Totale Anagrafiche Attive", int(num_tesserati))
+    k1.metric("Anagrafiche Attive", int(num_tesserati), f"{int(num_giocatori)} giocano", delta_color="off")
     k2.metric(f"Quote Incassate ({current_year})", f"€ {tot_quote:,.2f}")
     k3.metric(f"Ricavi Sponsor 398 ({current_year})", f"€ {tot_sponsor:,.2f}")
     k4.metric(f"IVA 398 da Versare 50% ({current_year})", f"€ {iva_50_versare:,.2f}")
 
     st.divider()
-    st.markdown("### 🚑 Alert Certificati Medici Agonistici")
+    st.markdown("### 🚑 Alert Certificati Medici (solo tesserati che giocano)")
+    st.caption("Chi non svolge attività sportiva (es. dirigenti che non giocano) non ha l'obbligo del certificato e non compare qui.")
     if not df_cert_alert.empty:
         for _, r in df_cert_alert.iterrows():
-            if r["Scadenza"] < today:
-                st.error(f"⛔ **{r['Calciatore']}** - CERTIFICATO SCADUTO IL {r['Scadenza']} (Non schierabile in gara)")
+            if pd.isna(r["Scadenza"]) or not r["Scadenza"]:
+                st.error(f"⛔ **{r['Tesserato']}** - CERTIFICATO MANCANTE (Non schierabile in gara)")
+            elif r["Scadenza"] < today:
+                st.error(f"⛔ **{r['Tesserato']}** - CERTIFICATO SCADUTO IL {r['Scadenza']} (Non schierabile in gara)")
             else:
-                st.warning(f"⚠️ **{r['Calciatore']}** - Certificato in scadenza il {r['Scadenza']}")
+                st.warning(f"⚠️ **{r['Tesserato']}** - Certificato in scadenza il {r['Scadenza']}")
         st.dataframe(df_cert_alert, width="stretch")
     else:
-        st.success("✅ Tutti i tesserati risultano con certificato medico agonistico in corso di validità.")
+        st.success("✅ Tutti i tesserati che giocano risultano con certificato medico in corso di validità.")
 
 # ---------------------------------------------------------
 # 2. SOCI, ATLETI & DIRIGENZA
@@ -432,8 +452,9 @@ elif menu == "Soci, Atleti & Dirigenza":
                        t.ruolo as Ruolo, 
                        a.codice_fiscale as 'Codice Fiscale',
                        t.matricola_figc as 'Matricola/Tessera N°', 
-                       t.quota_stagionale as 'Quota Dovuta (€)', 
-                       c.data_scadenza as 'Scadenza Medico', 
+                       t.quota_stagionale as 'Quota Dovuta (€)',
+                       CASE WHEN t.gioca = 1 THEN 'Sì' ELSE 'No' END as Gioca,
+                       CASE WHEN t.gioca = 1 THEN COALESCE(c.data_scadenza, 'MANCANTE') ELSE 'Non richiesto' END as 'Scadenza Medico',
                        t.stato as Stato
                 FROM anagrafiche a
                 LEFT JOIN tesserati_calcio t ON t.anagrafica_id = a.id
@@ -451,8 +472,41 @@ elif menu == "Soci, Atleti & Dirigenza":
 
             df_anag_view = pd.read_sql_query(query_anag, conn, params=params)
             st.dataframe(df_anag_view, width="stretch")
+
+            df_gioca = pd.read_sql_query(
+                """
+                SELECT t.id, a.denominazione as Nome, t.categoria as Categoria, t.ruolo as Ruolo, t.gioca = 1 as Gioca
+                FROM tesserati_calcio t JOIN anagrafiche a ON t.anagrafica_id = a.id
+                ORDER BY t.categoria, a.denominazione
+                """,
+                conn
+            )
         finally:
             conn.close()
+
+        with st.expander("⚽ Imposta rapidamente chi gioca (certificato medico obbligatorio)"):
+            if df_gioca.empty:
+                st.info("Nessun tesserato presente.")
+            else:
+                df_gioca["Gioca"] = df_gioca["Gioca"].astype(bool)
+                df_gioca_edit = st.data_editor(
+                    df_gioca,
+                    hide_index=True,
+                    width="stretch",
+                    disabled=["id", "Nome", "Categoria", "Ruolo"],
+                    column_config={"id": None, "Gioca": st.column_config.CheckboxColumn("Gioca")},
+                    key="editor_gioca"
+                )
+                if st.button("💾 Salva chi gioca"):
+                    cambiati = df_gioca_edit[df_gioca_edit["Gioca"] != df_gioca["Gioca"]]
+                    try:
+                        with db_write() as w_conn:
+                            for _, r in cambiati.iterrows():
+                                w_conn.execute("UPDATE tesserati_calcio SET gioca = ? WHERE id = ?", [int(bool(r["Gioca"])), int(r["id"])])
+                        st.session_state["flash"] = f"Aggiornati {len(cambiati)} tesserati."
+                        st.rerun()
+                    except Exception as ex_g:
+                        st.error(f"Errore durante il salvataggio: {ex_g}")
 
     with tab_add:
         with st.expander("➕ Inserisci Singola Persona / Dirigente / Atleta"):
@@ -467,15 +521,19 @@ elif menu == "Soci, Atleti & Dirigenza":
                 ruolo = c5.selectbox("Ruolo", RUOLI_LISTA)
                 quota = c6.number_input("Quota dovuta Anno Sportivo (€)", min_value=0.0, step=10.0)
 
+                gioca = st.checkbox("⚽ Gioca / svolge attività sportiva (certificato medico obbligatorio)", value=True)
+
                 st.markdown("---")
-                st.write("**Certificato Medico Agonistico**")
+                st.write("**Certificato Medico Agonistico** (solo per chi gioca: lascia vuoto se non disponibile)")
                 cm1, cm2, cm3 = st.columns(3)
-                data_ril = cm1.date_input("Data Rilascio Certificato")
-                data_scad = cm2.date_input("Data Scadenza Certificato")
+                data_ril = cm1.date_input("Data Rilascio Certificato", value=None, format="DD/MM/YYYY")
+                data_scad = cm2.date_input("Data Scadenza Certificato", value=None, format="DD/MM/YYYY")
                 medico = cm3.text_input("Medico Certificatore / Centro")
 
                 if st.form_submit_button("Salva in Anagrafica"):
-                    if nome:
+                    if data_ril and data_scad and data_scad <= data_ril:
+                        st.error("La data di scadenza del certificato deve essere successiva alla data di rilascio.")
+                    elif nome:
                         try:
                             with db_write() as w_conn:
                                 res1 = w_conn.execute(
@@ -485,16 +543,17 @@ elif menu == "Soci, Atleti & Dirigenza":
                                 anag_id = res1.lastrowid
 
                                 w_conn.execute(
-                                    "INSERT INTO tesserati_calcio (anagrafica_id, matricola_figc, categoria, ruolo, data_tesseramento, quota_stagionale) "
-                                    "VALUES (?, ?, ?, ?, strftime('%Y-%m-%d', 'now'), ?)",
-                                    [int(anag_id), str(matricola).strip(), str(categoria), str(ruolo), float(quota)]
+                                    "INSERT INTO tesserati_calcio (anagrafica_id, matricola_figc, categoria, ruolo, data_tesseramento, quota_stagionale, gioca) "
+                                    "VALUES (?, ?, ?, ?, strftime('%Y-%m-%d', 'now'), ?, ?)",
+                                    [int(anag_id), str(matricola).strip(), str(categoria), str(ruolo), float(quota), int(gioca)]
                                 )
 
-                                w_conn.execute(
-                                    "INSERT INTO certificati_medici (anagrafica_id, tipo, data_rilascio, data_scadenza, medico_certificatore, stato_idoneita) "
-                                    "VALUES (?, 'AGONISTICO', ?, ?, ?, 'IDONEO')",
-                                    [int(anag_id), str(data_ril), str(data_scad), str(medico).strip()]
-                                )
+                                if data_scad:
+                                    w_conn.execute(
+                                        "INSERT INTO certificati_medici (anagrafica_id, tipo, data_rilascio, data_scadenza, medico_certificatore, stato_idoneita) "
+                                        "VALUES (?, 'AGONISTICO', ?, ?, ?, 'IDONEO')",
+                                        [int(anag_id), str(data_ril or ""), str(data_scad), str(medico).strip()]
+                                    )
 
                             st.session_state["flash"] = f"Anagrafica '{nome}' salvata con successo!"
                             st.rerun()
@@ -510,6 +569,7 @@ elif menu == "Soci, Atleti & Dirigenza":
                 "Categoria": "STAFF",
                 "Ruolo": "Dirigente",
                 "Quota_Stagionale": 0.00,
+                "Gioca": "NO",
                 "Data_Rilascio_Certificato": "2026-06-01",
                 "Scadenza_Certificato": "2027-05-31"
             }])
@@ -559,11 +619,18 @@ elif menu == "Soci, Atleti & Dirigenza":
                                     categoria = cat_imported if cat_imported in CATEGORIE_LISTA else "STAFF"
                                     ruolo = str(row.get("Ruolo", "Dirigente")).strip() if pd.notna(row.get("Ruolo")) else "Dirigente"
 
+                                    # Gioca: SI/NO dal file; se la colonna manca, lo STAFF non gioca e gli altri sì
+                                    gioca_raw = row.get("Gioca")
+                                    if pd.notna(gioca_raw) and str(gioca_raw).strip():
+                                        gioca_imp = 1 if str(gioca_raw).strip().upper() in ("SI", "SÌ", "S", "X", "1", "TRUE", "VERO") else 0
+                                    else:
+                                        gioca_imp = 0 if categoria == "STAFF" else 1
+
                                     quota_raw = str(row.get("Quota_Stagionale", 0)).replace(",", ".")
                                     quota_stag = float(quota_raw) if pd.notna(row.get("Quota_Stagionale")) else 0.0
 
-                                    data_ril = str(row.get("Data_Rilascio_Certificato", "")).strip()[:10] if pd.notna(row.get("Data_Rilascio_Certificato")) else ""
-                                    scad_medica = str(row.get("Scadenza_Certificato", "")).strip()[:10] if pd.notna(row.get("Scadenza_Certificato")) else ""
+                                    data_ril = data_iso(row.get("Data_Rilascio_Certificato"))
+                                    scad_medica = data_iso(row.get("Scadenza_Certificato"))
 
                                     res_a = w_conn.execute(
                                         "INSERT INTO anagrafiche (tipo, denominazione, codice_fiscale) VALUES ('SOCIO_CALCIATORE', ?, ?)",
@@ -572,13 +639,13 @@ elif menu == "Soci, Atleti & Dirigenza":
                                     anag_id = res_a.lastrowid
 
                                     w_conn.execute(
-                                        "INSERT INTO tesserati_calcio (anagrafica_id, matricola_figc, categoria, ruolo, data_tesseramento, quota_stagionale) "
-                                        "VALUES (?, ?, ?, ?, strftime('%Y-%m-%d', 'now'), ?)",
-                                        [int(anag_id), matricola, categoria, ruolo, quota_stag]
+                                        "INSERT INTO tesserati_calcio (anagrafica_id, matricola_figc, categoria, ruolo, data_tesseramento, quota_stagionale, gioca) "
+                                        "VALUES (?, ?, ?, ?, strftime('%Y-%m-%d', 'now'), ?, ?)",
+                                        [int(anag_id), matricola, categoria, ruolo, quota_stag, gioca_imp]
                                     )
 
                                     if scad_medica and scad_medica.lower() != "nan":
-                                        rilascio = data_ril if (data_ril and data_ril.lower() != "nan") else "2026-01-01"
+                                        rilascio = data_ril if (data_ril and data_ril.lower() != "nan") else ""
                                         w_conn.execute(
                                             "INSERT INTO certificati_medici (anagrafica_id, tipo, data_rilascio, data_scadenza, stato_idoneita) "
                                             "VALUES (?, 'AGONISTICO', ?, ?, 'IDONEO')",
@@ -616,8 +683,8 @@ elif menu == "Soci, Atleti & Dirigenza":
             conn = get_ro_conn()
             try:
                 df_a = pd.read_sql_query("SELECT denominazione, codice_fiscale FROM anagrafiche WHERE id = ?", conn, params=[selected_anag_id])
-                df_t = pd.read_sql_query("SELECT matricola_figc, categoria, ruolo, quota_stagionale, stato FROM tesserati_calcio WHERE anagrafica_id = ?", conn, params=[selected_anag_id])
-                df_c = pd.read_sql_query("SELECT data_rilascio, data_scadenza, medico_certificatore FROM certificati_medici WHERE anagrafica_id = ?", conn, params=[selected_anag_id])
+                df_t = pd.read_sql_query("SELECT matricola_figc, categoria, ruolo, quota_stagionale, stato, gioca FROM tesserati_calcio WHERE anagrafica_id = ?", conn, params=[selected_anag_id])
+                df_c = pd.read_sql_query("SELECT data_rilascio, data_scadenza, medico_certificatore FROM certificati_medici WHERE anagrafica_id = ? ORDER BY data_scadenza DESC", conn, params=[selected_anag_id])
             finally:
                 conn.close()
 
@@ -631,6 +698,7 @@ elif menu == "Soci, Atleti & Dirigenza":
             cur_role = first_val(df_t, "ruolo", "Dirigente")
             cur_quota = float(first_val(df_t, "quota_stagionale", 0.0))
             cur_stato = first_val(df_t, "stato", "ATTIVO")
+            cur_gioca = bool(int(first_val(df_t, "gioca", 1)))
 
             has_cert = not df_c.empty
             cur_ril = first_val(df_c, "data_rilascio")
@@ -648,34 +716,40 @@ elif menu == "Soci, Atleti & Dirigenza":
                 cat_idx = CATEGORIE_LISTA.index(cur_cat) if cur_cat in CATEGORIE_LISTA else 0
                 e_categoria = e_col4.selectbox("Categoria / Inquadramento", CATEGORIE_LISTA, index=cat_idx)
 
-                role_idx = RUOLI_LISTA.index(cur_role) if cur_role in RUOLI_LISTA else 0
-                e_ruolo = e_col5.selectbox("Ruolo", RUOLI_LISTA, index=role_idx)
+                # Un ruolo non in elenco (es. "Calciatore" da importazione) viene mantenuto, non sostituito col primo
+                ruoli_opzioni = RUOLI_LISTA if cur_role in RUOLI_LISTA else [cur_role] + RUOLI_LISTA
+                e_ruolo = e_col5.selectbox("Ruolo", ruoli_opzioni, index=ruoli_opzioni.index(cur_role))
                 e_quota = e_col6.number_input("Quota dovuta Anno Sportivo (€)", value=float(cur_quota), step=10.0)
 
                 e_col7 = st.columns(1)[0]
                 st_opts = ["ATTIVO", "INATTIVO", "IN_PRESTITO"]
                 st_idx = st_opts.index(cur_stato) if cur_stato in st_opts else 0
                 e_stato = e_col7.selectbox("Stato Scheda", st_opts, index=st_idx)
+                e_gioca = st.checkbox("⚽ Gioca / svolge attività sportiva (certificato medico obbligatorio)", value=cur_gioca)
 
                 st.markdown("---")
-                st.write("**Certificato Medico Agonistico**")
+                st.write("**Certificato Medico Agonistico** (solo per chi gioca)")
                 m_col1, m_col2, m_col3 = st.columns(3)
 
+                # Nessuna data predefinita: un certificato assente resta assente
                 try:
-                    d_ril = datetime.datetime.strptime(cur_ril, "%Y-%m-%d").date() if cur_ril else datetime.date.today()
+                    d_ril = datetime.datetime.strptime(cur_ril, "%Y-%m-%d").date() if cur_ril else None
                 except Exception:
-                    d_ril = datetime.date.today()
+                    d_ril = None
 
                 try:
-                    d_scad = datetime.datetime.strptime(cur_scad, "%Y-%m-%d").date() if cur_scad else datetime.date.today()
+                    d_scad = datetime.datetime.strptime(cur_scad, "%Y-%m-%d").date() if cur_scad else None
                 except Exception:
-                    d_scad = datetime.date.today()
+                    d_scad = None
 
-                e_data_ril = m_col1.date_input("Data Rilascio Certificato", value=d_ril)
-                e_data_scad = m_col2.date_input("Data Scadenza Certificato", value=d_scad)
+                e_data_ril = m_col1.date_input("Data Rilascio Certificato", value=d_ril, format="DD/MM/YYYY")
+                e_data_scad = m_col2.date_input("Data Scadenza Certificato", value=d_scad, format="DD/MM/YYYY")
                 e_medico = m_col3.text_input("Medico Certificatore", value=cur_medico)
 
                 if st.form_submit_button("💾 Salva Modifiche Scheda"):
+                    if e_data_ril and e_data_scad and e_data_scad <= e_data_ril:
+                        st.error("La data di scadenza del certificato deve essere successiva alla data di rilascio.")
+                        st.stop()
                     try:
                         with db_write() as w_conn:
                             w_conn.execute(
@@ -685,27 +759,28 @@ elif menu == "Soci, Atleti & Dirigenza":
 
                             if has_tess:
                                 w_conn.execute(
-                                    "UPDATE tesserati_calcio SET matricola_figc = ?, categoria = ?, ruolo = ?, quota_stagionale = ?, stato = ? WHERE anagrafica_id = ?",
-                                    [str(e_matricola).strip(), str(e_categoria), str(e_ruolo), float(e_quota), str(e_stato), int(selected_anag_id)]
+                                    "UPDATE tesserati_calcio SET matricola_figc = ?, categoria = ?, ruolo = ?, quota_stagionale = ?, stato = ?, gioca = ? WHERE anagrafica_id = ?",
+                                    [str(e_matricola).strip(), str(e_categoria), str(e_ruolo), float(e_quota), str(e_stato), int(e_gioca), int(selected_anag_id)]
                                 )
                             else:
                                 w_conn.execute(
-                                    "INSERT INTO tesserati_calcio (anagrafica_id, matricola_figc, categoria, ruolo, data_tesseramento, quota_stagionale, stato) "
-                                    "VALUES (?, ?, ?, ?, strftime('%Y-%m-%d', 'now'), ?, ?)",
-                                    [int(selected_anag_id), str(e_matricola).strip(), str(e_categoria), str(e_ruolo), float(e_quota), str(e_stato)]
+                                    "INSERT INTO tesserati_calcio (anagrafica_id, matricola_figc, categoria, ruolo, data_tesseramento, quota_stagionale, stato, gioca) "
+                                    "VALUES (?, ?, ?, ?, strftime('%Y-%m-%d', 'now'), ?, ?, ?)",
+                                    [int(selected_anag_id), str(e_matricola).strip(), str(e_categoria), str(e_ruolo), float(e_quota), str(e_stato), int(e_gioca)]
                                 )
 
-                            if has_cert:
-                                w_conn.execute(
-                                    "UPDATE certificati_medici SET data_rilascio = ?, data_scadenza = ?, medico_certificatore = ? WHERE anagrafica_id = ?",
-                                    [str(e_data_ril), str(e_data_scad), str(e_medico).strip(), int(selected_anag_id)]
-                                )
-                            elif e_data_scad:
-                                w_conn.execute(
-                                    "INSERT INTO certificati_medici (anagrafica_id, tipo, data_rilascio, data_scadenza, medico_certificatore, stato_idoneita) "
-                                    "VALUES (?, 'AGONISTICO', ?, ?, ?, 'IDONEO')",
-                                    [int(selected_anag_id), str(e_data_ril), str(e_data_scad), str(e_medico).strip()]
-                                )
+                            if e_data_scad:
+                                if has_cert:
+                                    w_conn.execute(
+                                        "UPDATE certificati_medici SET data_rilascio = ?, data_scadenza = ?, medico_certificatore = ? WHERE anagrafica_id = ?",
+                                        [str(e_data_ril or ""), str(e_data_scad), str(e_medico).strip(), int(selected_anag_id)]
+                                    )
+                                else:
+                                    w_conn.execute(
+                                        "INSERT INTO certificati_medici (anagrafica_id, tipo, data_rilascio, data_scadenza, medico_certificatore, stato_idoneita) "
+                                        "VALUES (?, 'AGONISTICO', ?, ?, ?, 'IDONEO')",
+                                        [int(selected_anag_id), str(e_data_ril or ""), str(e_data_scad), str(e_medico).strip()]
+                                    )
 
                         st.session_state["flash"] = f"Scheda di '{e_nome}' aggiornata con successo!"
                         st.rerun()
@@ -858,10 +933,10 @@ elif menu == "Ricevute Istituzionali (Art. 4)":
         conn.close()
 
 # ---------------------------------------------------------
-# 4. SPONSOR & PUBBLICITÀ (REGIME LEGGE 398/98)
+# 4. SPONSOR & PUBBLICITÀ (REGIME LEGGE 398/91)
 # ---------------------------------------------------------
-elif menu == "Sponsor & Pubblicità (398/98)":
-    st.subheader("🏢 Gestione Fatture Sponsorizzazioni e Prospetto 398/98")
+elif menu == "Sponsor & Pubblicità (398/91)":
+    st.subheader("🏢 Gestione Fatture Sponsorizzazioni e Prospetto 398/91")
 
     with st.expander("➕ Aggiungi Nuova Azienda Sponsor"):
         with st.form("nuovo_sponsor", clear_on_submit=True):
@@ -910,7 +985,7 @@ elif menu == "Sponsor & Pubblicità (398/98)":
             imponibile = st.number_input("Imponibile (€)", min_value=0.01, step=100.0)
             aliquota = 22.0
 
-            if st.form_submit_button("Registra Fattura 398/98 in Archivio e Registro"):
+            if st.form_submit_button("Registra Fattura 398/91 in Archivio e Registro"):
                 if imponibile > 0:
                     try:
                         iva_totale = round(imponibile * (aliquota / 100), 2)
@@ -1322,7 +1397,7 @@ elif menu == "Prima Nota & Rendiconto ASD":
 # 8. PIANO DEI CONTI ASD
 # ---------------------------------------------------------
 elif menu == "Piano dei Conti ASD":
-    st.subheader("🌳 Struttura del Piano dei Conti ASD (Legge 398/98)")
+    st.subheader("🌳 Struttura del Piano dei Conti ASD (Legge 398/91)")
 
     if st.button("🔄 Ripopola / Aggiorna Piano dei Conti Predefinito"):
         try:

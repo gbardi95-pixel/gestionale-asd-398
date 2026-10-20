@@ -15,7 +15,7 @@ PIANO_DEI_CONTI_ASD = [
 
     ('10.02', 'Crediti Istituzionali e Commerciali', 'ATTIVITA', 2),
     ('10.02.001', 'Crediti v/Soci e Calciatori (Quote)', 'ATTIVITA', 3),
-    ('10.02.002', 'Crediti v/Sponsor e Partner (398/98)', 'ATTIVITA', 3),
+    ('10.02.002', 'Crediti v/Sponsor e Partner (398/91)', 'ATTIVITA', 3),
     ('10.02.003', 'Erario c/IVA a Credito', 'ATTIVITA', 3),
 
     ('10.03', 'Immobilizzazioni e Attrezzature Sportive', 'ATTIVITA', 2),
@@ -31,7 +31,7 @@ PIANO_DEI_CONTI_ASD = [
     ('20.01.002', 'Debiti v/Gestori Campi e Impianti', 'PASSIVITA', 3),
 
     ('20.02', 'Debiti Tributari e Lavoro Sportivo', 'PASSIVITA', 2),
-    ('20.02.001', 'Erario c/IVA 398/98 da Versare (50%)', 'PASSIVITA', 3),
+    ('20.02.001', 'Erario c/IVA 398/91 da Versare (50%)', 'PASSIVITA', 3),
     ('20.02.002', 'Debiti v/Collaboratori Sportivi (D.Lgs. 36/2021)', 'PASSIVITA', 3),
     ('20.02.003', 'Debiti v/INPS Cassa Separata Sport', 'PASSIVITA', 3),
     ('20.02.004', 'Debiti v/Erario per Ritenute IRPEF', 'PASSIVITA', 3),
@@ -77,7 +77,7 @@ PIANO_DEI_CONTI_ASD = [
     ('50.01.002', 'Quote Iscrizione e Frequenza Calciatori', 'RICAVO', 3),
     ('50.01.003', 'Erogazioni Liberali e Contributi da Privati/Enti', 'RICAVO', 3),
 
-    ('50.02', 'Ricavi Commerciali (Regime Legge 398/98)', 'RICAVO', 2),
+    ('50.02', 'Ricavi Commerciali (Regime Legge 398/91)', 'RICAVO', 2),
     ('50.02.001', 'Sponsorizzazioni e Cartellonistica Campo', 'RICAVO', 3),
     ('50.02.002', 'Pubblicità su Abbigliamento Tecnico e Materiale', 'RICAVO', 3),
     ('50.02.003', 'Proventi Gestione Bar / Punto Ristoro Campo', 'RICAVO', 3),
@@ -104,7 +104,7 @@ def populate_pdc():
 
     conn.commit()
     conn.close()
-    print(f"✅ Piano dei Conti ASD 398/98 popolato con successo! Inseriti {len(PIANO_DEI_CONTI_ASD)} sottoconti.")
+    print(f"✅ Piano dei Conti ASD 398/91 popolato con successo! Inseriti {len(PIANO_DEI_CONTI_ASD)} sottoconti.")
 
 if __name__ == "__main__":
     populate_pdc()

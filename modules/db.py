@@ -3,7 +3,7 @@ import sqlite3
 import time
 import streamlit as st
 
-# Piano dei Conti predefinito per ASD Calcio a 11 (Legge 398/98)
+# Piano dei Conti predefinito per ASD Calcio a 11 (Legge 398/91)
 PIANO_DEI_CONTI_ASD = [
     # 10. ATTIVITÀ
     ('10', 'ATTIVITÀ CIRCOLANTI E CASSA', 'ATTIVITA', 1),
@@ -20,7 +20,7 @@ PIANO_DEI_CONTI_ASD = [
     ('20.01', 'Debiti Commerciali e Tributari', 'PASSIVITA', 2),
     ('20.01.001', 'Debiti v/Fornitori', 'PASSIVITA', 3),
     ('20.02', 'Debiti Tributari e Sportivi', 'PASSIVITA', 2),
-    ('20.02.001', 'Erario c/IVA 398/98 da Versare', 'PASSIVITA', 3),
+    ('20.02.001', 'Erario c/IVA 398/91 da Versare', 'PASSIVITA', 3),
     ('20.02.002', 'Debiti v/Collaboratori e Istruttori', 'PASSIVITA', 3),
 
     # 30. PATRIMONIO NETTO
@@ -46,7 +46,7 @@ PIANO_DEI_CONTI_ASD = [
     ('50.01', 'Entrate Istituzionali (Art. 4 DPR 633/72)', 'RICAVO', 2),
     ('50.01.001', 'Quote Associative Annue', 'RICAVO', 3),
     ('50.01.002', 'Quote Iscrizione e Frequenza Calciatori', 'RICAVO', 3),
-    ('50.02', 'Entrate Commerciali (Regime 398/98)', 'RICAVO', 2),
+    ('50.02', 'Entrate Commerciali (Regime 398/91)', 'RICAVO', 2),
     ('50.02.001', 'Ricavi per Sponsorizzazioni e Pubblicità', 'RICAVO', 3),
     ('50.02.002', 'Contributi da Enti e Associazioni', 'RICAVO', 3),
 ]
@@ -160,9 +160,18 @@ def init_db():
         ruolo TEXT,
         data_tesseramento TEXT,
         quota_stagionale REAL DEFAULT 0.00,
-        stato TEXT DEFAULT 'ATTIVO' CHECK(stato IN ('ATTIVO', 'INATTIVO', 'IN_PRESTITO'))
+        stato TEXT DEFAULT 'ATTIVO' CHECK(stato IN ('ATTIVO', 'INATTIVO', 'IN_PRESTITO')),
+        gioca INTEGER NOT NULL DEFAULT 1
     );
     """)
+
+    # Migrazione: colonna "gioca" (1 = svolge attività sportiva, certificato medico obbligatorio).
+    # Se la colonna manca viene aggiunta e lo STAFF già presente viene impostato come "non gioca".
+    try:
+        cursor.execute("ALTER TABLE tesserati_calcio ADD COLUMN gioca INTEGER NOT NULL DEFAULT 1;")
+        cursor.execute("UPDATE tesserati_calcio SET gioca = 0 WHERE categoria = 'STAFF';")
+    except Exception:
+        pass  # colonna già presente
 
     # 4. Certificati Medici Agonistici
     cursor.execute("""
@@ -193,7 +202,7 @@ def init_db():
     );
     """)
 
-    # 6. Fatture Sponsor & Pubblicità (Regime 398/98)
+    # 6. Fatture Sponsor & Pubblicità (Regime 398/91)
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS fatture_sponsor_398 (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
