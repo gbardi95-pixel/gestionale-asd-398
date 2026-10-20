@@ -11,12 +11,16 @@ from modules.db import PIANO_DEI_CONTI_ASD, get_connection, init_db, usa_turso
 # ---------------------------------------------------------
 # INIZIALIZZAZIONE & CACHING RESOURCE DB
 # ---------------------------------------------------------
+# Incrementare a ogni modifica dello schema del DB: forza init_db() (e le migrazioni)
+# anche quando Streamlit Cloud aggiorna il codice senza riavviare il server.
+VERSIONE_SCHEMA_DB = 2
+
 @st.cache_resource
-def _setup_database():
+def _setup_database(versione_schema):
     init_db()
     return True
 
-_setup_database()
+_setup_database(VERSIONE_SCHEMA_DB)
 
 # Titolo dinamico da Secrets
 try:
