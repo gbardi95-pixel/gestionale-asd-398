@@ -3,7 +3,8 @@ import datetime
 import hmac
 import io
 import os
-import sqlite3
+import threading
+import warnings
 import pandas as pd
 import streamlit as st
 from contextlib import contextmanager
@@ -78,6 +79,10 @@ if st.sidebar.button("🚪 Esci"):
     st.session_state.pop("autenticato", None)
     st.rerun()
 
+if st.sidebar.button("🔄 Ricarica dati", help="Rilegge i dati dal database (utile se sono stati modificati da un altro dispositivo)."):
+    st.cache_data.clear()
+    st.rerun()
+
 if not usa_turso():
     st.sidebar.warning("⚠️ Turso non configurato: stai usando un database LOCALE di prova.")
 
@@ -120,6 +125,7 @@ def db_write():
             pass
         yield conn
         conn.commit()
+        st.cache_data.clear()  # i dati sono cambiati: le letture in memoria vanno rifatte
     except Exception:
         try:
             conn.rollback()
@@ -130,13 +136,36 @@ def db_write():
         conn.close()
 
 def get_ro_conn():
-    """Restituisce una connessione DB per letture."""
-    conn = get_connection()
-    try:
-        conn.execute("PRAGMA foreign_keys = ON;")
-    except Exception:
-        pass
-    return conn
+    """Connessione per letture che devono essere sempre aggiornate (controlli prima di salvare)."""
+    return get_connection()
+
+# pandas avvisa a ogni lettura che la connessione Turso non è sqlite3: funziona, l'avviso riempie solo i log
+warnings.filterwarnings("ignore", message="pandas only supports SQLAlchemy connectable")
+
+@st.cache_resource(show_spinner=False)
+def _connessione_letture():
+    """Connessione tenuta aperta per le letture: aprirne una nuova su Turso costa circa mezzo secondo."""
+    return {"conn": get_connection(), "lock": threading.Lock()}
+
+@st.cache_data(ttl=600, show_spinner=False)
+def leggi_df(sql, params=None):
+    """Lettura dal database tenuta in memoria per 10 minuti, così i clic sulla pagina non rifanno le query su Turso.
+
+    La memoria si svuota a ogni salvataggio fatto dall'app (db_write) e con il pulsante «Ricarica dati».
+    """
+    risorsa = _connessione_letture()
+    parametri = list(params) if params else None
+    with risorsa["lock"]:
+        try:
+            return pd.read_sql_query(sql, risorsa["conn"], params=parametri)
+        except Exception:
+            # Connessione scaduta o interrotta: se ne apre una nuova e si riprova una volta
+            try:
+                risorsa["conn"].close()
+            except Exception:
+                pass
+            risorsa["conn"] = get_connection()
+            return pd.read_sql_query(sql, risorsa["conn"], params=parametri)
 
 def get_conto_id(conn, codice):
     """Restituisce l'ID del conto dal Piano dei Conti verificandone l'esistenza."""
@@ -161,13 +190,13 @@ def data_iso(val):
     parsed = pd.to_datetime(s[:10], format="%Y-%m-%d", errors="coerce") if len(s) >= 10 and s[4] == "-" else pd.to_datetime(s, dayfirst=True, errors="coerce")
     return parsed.strftime("%Y-%m-%d") if pd.notna(parsed) else ""
 
-def prossimo_numero(conn, tabella, col_numero, col_data, anno):
+def prossimo_numero(tabella, col_numero, col_data, anno):
     """Prossimo progressivo dell'anno: il numero più alto già usato + 1 (non il conteggio, che crea doppioni se si cancella un documento)."""
-    res = conn.execute(
-        f"SELECT COALESCE(MAX(CAST({col_numero} AS INTEGER)), 0) + 1 FROM {tabella} WHERE strftime('%Y', {col_data}) = ?",
+    df = leggi_df(
+        f"SELECT COALESCE(MAX(CAST({col_numero} AS INTEGER)), 0) + 1 AS prossimo FROM {tabella} WHERE strftime('%Y', {col_data}) = ?",
         [str(anno)]
-    ).fetchone()
-    return int(res[0])
+    )
+    return int(df["prossimo"].iloc[0])
 
 def controlla_numero_documento(conn, tabella, col_numero, numero, anno):
     """Restituisce un messaggio di errore se il numero è già usato o non riporta l'anno della data, altrimenti None."""
@@ -189,24 +218,17 @@ def valore_pulito(v):
 
 def modello_distinta_bytes():
     """Modello Word della distinta: quello caricato dall'app se presente, altrimenti quello generico del progetto."""
-    conn = get_ro_conn()
-    try:
-        row = conn.execute("SELECT contenuto_base64 FROM modelli_documenti WHERE nome = 'distinta_gara'").fetchone()
-    finally:
-        conn.close()
-    if row and row[0]:
-        return base64.b64decode(row[0])
+    df = leggi_df("SELECT contenuto_base64 FROM modelli_documenti WHERE nome = 'distinta_gara'")
+    if not df.empty and df["contenuto_base64"].iloc[0]:
+        return base64.b64decode(df["contenuto_base64"].iloc[0])
     with open(distinte.MODELLO_GENERICO, "rb") as f:
         return f.read()
 
+@st.cache_data(ttl=600, show_spinner=False)
 def docx_distinta(distinta_id):
     """File Word compilato di una distinta salvata."""
-    conn = get_ro_conn()
-    try:
-        df_t = pd.read_sql_query("SELECT * FROM distinte_gara WHERE id = ?", conn, params=[int(distinta_id)])
-        df_r = pd.read_sql_query("SELECT * FROM distinte_gara_righe WHERE distinta_id = ? ORDER BY ordine", conn, params=[int(distinta_id)])
-    finally:
-        conn.close()
+    df_t = leggi_df("SELECT * FROM distinte_gara WHERE id = ?", [int(distinta_id)])
+    df_r = leggi_df("SELECT * FROM distinte_gara_righe WHERE distinta_id = ? ORDER BY ordine", [int(distinta_id)])
     testata = {k: valore_pulito(v) for k, v in df_t.iloc[0].items()}
     righe = [{k: valore_pulito(v) for k, v in r.items()} for r in df_r.to_dict("records")]
     return distinte.genera_docx(modello_distinta_bytes(), distinte.contesto_distinta(testata, righe, NOME_SOCIETA))
@@ -407,54 +429,40 @@ if menu == "Dashboard & Alert Scadenze":
     current_year = str(datetime.date.today().year)
     in_30_days = (datetime.date.today() + datetime.timedelta(days=30)).strftime("%Y-%m-%d")
 
-    conn = get_ro_conn()
-    try:
-        # Solo chi gioca (tesserato attivo) ha l'obbligo del certificato: mancante, scaduto o in scadenza entro 30 giorni
-        df_cert_alert = pd.read_sql_query(
-            """
-            SELECT a.denominazione as 'Tesserato', t.categoria as Categoria, t.ruolo as Ruolo,
-                   c.tipo as Tipo, c.data_scadenza as 'Scadenza', c.stato_idoneita as Idoneità
-            FROM tesserati_calcio t
-            JOIN anagrafiche a ON t.anagrafica_id = a.id
-            LEFT JOIN (
-                SELECT anagrafica_id, MAX(data_scadenza) as data_scadenza, tipo, stato_idoneita
-                FROM certificati_medici
-                GROUP BY anagrafica_id
-            ) c ON c.anagrafica_id = a.id
-            WHERE t.gioca = 1 AND t.stato = 'ATTIVO'
-              AND (c.data_scadenza IS NULL OR c.data_scadenza <= ?)
-            ORDER BY c.data_scadenza IS NOT NULL, c.data_scadenza ASC, a.denominazione
-            """,
-            conn,
-            params=[in_30_days]
-        )
+    # Solo chi gioca (tesserato attivo) ha l'obbligo del certificato: mancante, scaduto o in scadenza entro 30 giorni
+    df_cert_alert = leggi_df(
+        """
+        SELECT a.denominazione as 'Tesserato', t.categoria as Categoria, t.ruolo as Ruolo,
+               c.tipo as Tipo, c.data_scadenza as 'Scadenza', c.stato_idoneita as Idoneità
+        FROM tesserati_calcio t
+        JOIN anagrafiche a ON t.anagrafica_id = a.id
+        LEFT JOIN (
+            SELECT anagrafica_id, MAX(data_scadenza) as data_scadenza, tipo, stato_idoneita
+            FROM certificati_medici
+            GROUP BY anagrafica_id
+        ) c ON c.anagrafica_id = a.id
+        WHERE t.gioca = 1 AND t.stato = 'ATTIVO'
+          AND (c.data_scadenza IS NULL OR c.data_scadenza <= ?)
+        ORDER BY c.data_scadenza IS NOT NULL, c.data_scadenza ASC, a.denominazione
+        """, [in_30_days]
+    )
 
-        num_tesserati = pd.read_sql_query(
-            "SELECT COUNT(*) as tot FROM tesserati_calcio WHERE stato='ATTIVO'", conn
-        )["tot"].iloc[0]
-        num_giocatori = pd.read_sql_query(
-            "SELECT COUNT(*) as tot FROM tesserati_calcio WHERE stato='ATTIVO' AND gioca = 1", conn
-        )["tot"].iloc[0]
+    num_tesserati = leggi_df(
+        "SELECT COUNT(*) as tot FROM tesserati_calcio WHERE stato='ATTIVO'")["tot"].iloc[0]
+    num_giocatori = leggi_df(
+        "SELECT COUNT(*) as tot FROM tesserati_calcio WHERE stato='ATTIVO' AND gioca = 1")["tot"].iloc[0]
 
-        tot_sponsor = pd.read_sql_query(
-            "SELECT COALESCE(SUM(imponibile), 0.0) as tot FROM fatture_sponsor_398 WHERE strftime('%Y', data_fattura) = ?",
-            conn,
-            params=[current_year]
-        )["tot"].iloc[0]
+    tot_sponsor = leggi_df(
+        "SELECT COALESCE(SUM(imponibile), 0.0) as tot FROM fatture_sponsor_398 WHERE strftime('%Y', data_fattura) = ?", [current_year]
+    )["tot"].iloc[0]
 
-        iva_50_versare = pd.read_sql_query(
-            "SELECT COALESCE(SUM(iva_da_versare_50), 0.0) as tot FROM fatture_sponsor_398 WHERE strftime('%Y', data_fattura) = ?",
-            conn,
-            params=[current_year]
-        )["tot"].iloc[0]
+    iva_50_versare = leggi_df(
+        "SELECT COALESCE(SUM(iva_da_versare_50), 0.0) as tot FROM fatture_sponsor_398 WHERE strftime('%Y', data_fattura) = ?", [current_year]
+    )["tot"].iloc[0]
 
-        tot_quote = pd.read_sql_query(
-            "SELECT COALESCE(SUM(importo), 0.0) as tot FROM ricevute_istituzionali WHERE strftime('%Y', data_emissione) = ?",
-            conn,
-            params=[current_year]
-        )["tot"].iloc[0]
-    finally:
-        conn.close()
+    tot_quote = leggi_df(
+        "SELECT COALESCE(SUM(importo), 0.0) as tot FROM ricevute_istituzionali WHERE strftime('%Y', data_emissione) = ?", [current_year]
+    )["tot"].iloc[0]
 
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("Anagrafiche Attive", int(num_tesserati), f"{int(num_giocatori)} giocano", delta_color="off")
@@ -495,50 +503,44 @@ elif menu == "Soci, Atleti & Dirigenza":
 
     with tab_list:
         filtro_cat = st.selectbox("Filtra per Categoria / Inquadramento", ["TUTTI"] + CATEGORIE_LISTA)
-        conn = get_ro_conn()
-        try:
-            query_anag = """
-                SELECT a.denominazione as Nome, 
-                       t.categoria as Categoria, 
-                       t.ruolo as Ruolo, 
-                       a.codice_fiscale as 'Codice Fiscale',
-                       t.numero_tessera as 'Matricola/Tessera N°', 
-                       t.numero_scheda_attivita as 'N° Scheda Attività', 
-                       t.tipo_tessera as 'Tipo Tessera',
-                       t.numero_maglia as 'Maglia',
-                       a.tipo_documento as 'Documento',
-                       a.numero_documento as 'N° Documento',
-                       t.quota_stagionale as 'Quota Dovuta (€)',
-                       CASE WHEN t.gioca = 1 THEN 'Sì' ELSE 'No' END as Gioca,
-                       CASE WHEN t.gioca = 1 THEN COALESCE(c.data_scadenza, 'MANCANTE') ELSE 'Non richiesto' END as 'Scadenza Medico',
-                       t.stato as Stato
-                FROM anagrafiche a
-                LEFT JOIN tesserati_calcio t ON t.anagrafica_id = a.id
-                LEFT JOIN (
-                    SELECT anagrafica_id, MAX(data_scadenza) as data_scadenza
-                    FROM certificati_medici GROUP BY anagrafica_id
-                ) c ON c.anagrafica_id = a.id
-                WHERE a.tipo IN ('SOCIO_CALCIATORE', 'ALTRO')
+        query_anag = """
+            SELECT a.denominazione as Nome, 
+                   t.categoria as Categoria, 
+                   t.ruolo as Ruolo, 
+                   a.codice_fiscale as 'Codice Fiscale',
+                   t.numero_tessera as 'Matricola/Tessera N°', 
+                   t.numero_scheda_attivita as 'N° Scheda Attività', 
+                   t.tipo_tessera as 'Tipo Tessera',
+                   t.numero_maglia as 'Maglia',
+                   a.tipo_documento as 'Documento',
+                   a.numero_documento as 'N° Documento',
+                   t.quota_stagionale as 'Quota Dovuta (€)',
+                   CASE WHEN t.gioca = 1 THEN 'Sì' ELSE 'No' END as Gioca,
+                   CASE WHEN t.gioca = 1 THEN COALESCE(c.data_scadenza, 'MANCANTE') ELSE 'Non richiesto' END as 'Scadenza Medico',
+                   t.stato as Stato
+            FROM anagrafiche a
+            LEFT JOIN tesserati_calcio t ON t.anagrafica_id = a.id
+            LEFT JOIN (
+                SELECT anagrafica_id, MAX(data_scadenza) as data_scadenza
+                FROM certificati_medici GROUP BY anagrafica_id
+            ) c ON c.anagrafica_id = a.id
+            WHERE a.tipo IN ('SOCIO_CALCIATORE', 'ALTRO')
+        """
+        params = []
+        if filtro_cat != "TUTTI":
+            query_anag += " AND t.categoria = ?"
+            params.append(filtro_cat)
+        query_anag += " ORDER BY t.categoria, a.denominazione"
+
+        df_anag_view = leggi_df(query_anag, params)
+        st.dataframe(df_anag_view, width="stretch")
+
+        df_gioca = leggi_df(
             """
-            params = []
-            if filtro_cat != "TUTTI":
-                query_anag += " AND t.categoria = ?"
-                params.append(filtro_cat)
-            query_anag += " ORDER BY t.categoria, a.denominazione"
-
-            df_anag_view = pd.read_sql_query(query_anag, conn, params=params)
-            st.dataframe(df_anag_view, width="stretch")
-
-            df_gioca = pd.read_sql_query(
-                """
-                SELECT t.id, a.denominazione as Nome, t.categoria as Categoria, t.ruolo as Ruolo, t.gioca = 1 as Gioca
-                FROM tesserati_calcio t JOIN anagrafiche a ON t.anagrafica_id = a.id
-                ORDER BY t.categoria, a.denominazione
-                """,
-                conn
-            )
-        finally:
-            conn.close()
+            SELECT t.id, a.denominazione as Nome, t.categoria as Categoria, t.ruolo as Ruolo, t.gioca = 1 as Gioca
+            FROM tesserati_calcio t JOIN anagrafiche a ON t.anagrafica_id = a.id
+            ORDER BY t.categoria, a.denominazione
+            """)
 
         with st.expander("⚽ Imposta rapidamente chi gioca (certificato medico obbligatorio)"):
             if df_gioca.empty:
@@ -633,19 +635,12 @@ elif menu == "Soci, Atleti & Dirigenza":
             if file_export is not None:
                 try:
                     df_export = tesseramento.leggi_csv_tesseramento(file_export.getvalue())
-                    conn = get_ro_conn()
-                    try:
-                        df_anag_u = pd.read_sql_query(
-                            "SELECT a.id, a.denominazione, a.codice_fiscale, t.id AS tid, t.numero_tessera, t.numero_scheda_attivita, t.stato "
-                            "FROM anagrafiche a LEFT JOIN tesserati_calcio t ON t.anagrafica_id = a.id "
-                            "WHERE a.tipo IN ('SOCIO_CALCIATORE', 'ALTRO')",
-                            conn
-                        )
-                        df_cert_u = pd.read_sql_query(
-                            "SELECT anagrafica_id, MAX(data_scadenza) AS scad FROM certificati_medici GROUP BY anagrafica_id", conn
-                        )
-                    finally:
-                        conn.close()
+                    df_anag_u = leggi_df(
+                        "SELECT a.id, a.denominazione, a.codice_fiscale, t.id AS tid, t.numero_tessera, t.numero_scheda_attivita, t.stato "
+                        "FROM anagrafiche a LEFT JOIN tesserati_calcio t ON t.anagrafica_id = a.id "
+                        "WHERE a.tipo IN ('SOCIO_CALCIATORE', 'ALTRO')")
+                    df_cert_u = leggi_df(
+                        "SELECT anagrafica_id, MAX(data_scadenza) AS scad FROM certificati_medici GROUP BY anagrafica_id")
 
                     piano, solo_gestionale = tesseramento.calcola_piano(df_export, df_anag_u, df_cert_u)
                     st.write(f"📋 Nel file: **{len(df_export)}** tesserati {ENTE_TESSERAMENTO}.")
@@ -747,7 +742,7 @@ elif menu == "Soci, Atleti & Dirigenza":
                                             continue
 
                                     matricola_val = row.get("Matricola_Tessera_N", "")
-                                    matricola = str(matricola_val).strip() if pd.notna(matricola_val) else ""
+                                    matricola = str(valore_pulito(matricola_val) or "").strip()  # 1234567.0 da Excel -> 1234567
 
                                     cat_imported = str(row.get("Categoria", "STAFF")).strip() if pd.notna(row.get("Categoria")) else "STAFF"
                                     categoria = cat_imported if cat_imported in CATEGORIE_LISTA else "STAFF"
@@ -800,29 +795,19 @@ elif menu == "Soci, Atleti & Dirigenza":
 
     with tab_edit:
         st.markdown("### ✏️ Modifica / Elimina Dati Scheda Anagrafica")
-        conn = get_ro_conn()
-        try:
-            df_people = pd.read_sql_query(
-                "SELECT id, denominazione, codice_fiscale FROM anagrafiche WHERE tipo IN ('SOCIO_CALCIATORE', 'ALTRO') ORDER BY denominazione",
-                conn
-            )
-        finally:
-            conn.close()
+        df_people = leggi_df(
+            "SELECT id, denominazione, codice_fiscale FROM anagrafiche WHERE tipo IN ('SOCIO_CALCIATORE', 'ALTRO') ORDER BY denominazione")
 
         if not df_people.empty:
             people_dict = {f"{row['denominazione']} (CF: {row['codice_fiscale'] or 'N.D.'})": int(row['id']) for _, row in df_people.iterrows()}
             selected_label = st.selectbox("Seleziona Persona da Modificare", list(people_dict.keys()))
             selected_anag_id = int(people_dict[selected_label])
 
-            conn = get_ro_conn()
-            try:
-                df_a = pd.read_sql_query("SELECT denominazione, codice_fiscale, tipo_documento, numero_documento FROM anagrafiche WHERE id = ?", conn, params=[selected_anag_id])
-                df_t = pd.read_sql_query(
-                    "SELECT numero_tessera, numero_scheda_attivita, tipo_tessera, numero_maglia, categoria, ruolo, quota_stagionale, stato, gioca "
-                    "FROM tesserati_calcio WHERE anagrafica_id = ?", conn, params=[selected_anag_id])
-                df_c = pd.read_sql_query("SELECT data_rilascio, data_scadenza, medico_certificatore FROM certificati_medici WHERE anagrafica_id = ? ORDER BY data_scadenza DESC", conn, params=[selected_anag_id])
-            finally:
-                conn.close()
+            df_a = leggi_df("SELECT denominazione, codice_fiscale, tipo_documento, numero_documento FROM anagrafiche WHERE id = ?", [selected_anag_id])
+            df_t = leggi_df(
+                "SELECT numero_tessera, numero_scheda_attivita, tipo_tessera, numero_maglia, categoria, ruolo, quota_stagionale, stato, gioca "
+                "FROM tesserati_calcio WHERE anagrafica_id = ?", [selected_anag_id])
+            df_c = leggi_df("SELECT data_rilascio, data_scadenza, medico_certificatore FROM certificati_medici WHERE anagrafica_id = ? ORDER BY data_scadenza DESC", [selected_anag_id])
 
             cur_nome = first_val(df_a, "denominazione")
             cur_cf = first_val(df_a, "codice_fiscale")
@@ -922,7 +907,9 @@ elif menu == "Soci, Atleti & Dirigenza":
                             if e_data_scad:
                                 if has_cert:
                                     w_conn.execute(
-                                        "UPDATE certificati_medici SET data_rilascio = ?, data_scadenza = ?, medico_certificatore = ? WHERE anagrafica_id = ?",
+                                        # Solo il certificato più recente: quelli precedenti restano come storico
+                                        "UPDATE certificati_medici SET data_rilascio = ?, data_scadenza = ?, medico_certificatore = ? WHERE id = "
+                                        "(SELECT id FROM certificati_medici WHERE anagrafica_id = ? ORDER BY data_scadenza DESC LIMIT 1)",
                                         [str(e_data_ril or ""), str(e_data_scad), str(e_medico).strip(), int(selected_anag_id)]
                                     )
                                 else:
@@ -945,11 +932,13 @@ elif menu == "Soci, Atleti & Dirigenza":
                     try:
                         c_ric = conn.execute("SELECT COUNT(*) FROM ricevute_istituzionali WHERE anagrafica_id = ?", [selected_anag_id]).fetchone()[0]
                         c_comp = conn.execute("SELECT COUNT(*) FROM compensi_sportivi WHERE collaboratore_id IN (SELECT id FROM collaboratori_sportivi WHERE anagrafica_id = ?)", [selected_anag_id]).fetchone()[0]
+                        c_rimb = conn.execute("SELECT COUNT(*) FROM rimborsi_trasferta WHERE anagrafica_id = ?", [selected_anag_id]).fetchone()[0]
                     finally:
                         conn.close()
 
-                    if c_ric > 0 or c_comp > 0:
-                        st.error("Impossibile eliminare l'anagrafica: risultano ricevute o compensi contabili associati.")
+                    if c_ric > 0 or c_comp > 0 or c_rimb > 0:
+                        st.error("Impossibile eliminare l'anagrafica: risultano ricevute, compensi o rimborsi trasferta associati. "
+                                 "Se non è più tesserata, imposta lo stato INATTIVO.")
                     else:
                         try:
                             with db_write() as w_conn:
@@ -974,20 +963,15 @@ elif menu == "Distinte di Gara":
     RUOLI_DISTINTA = ["Allenatore", "Allenatore in seconda", "Dirigente accompagnatore", "Presidente", "Vice presidente",
                       "Dirigente", "Massaggiatore", "Medico", "Preparatore atletico"]
 
-    conn = get_ro_conn()
-    try:
-        df_archivio = pd.read_sql_query(
-            """
-            SELECT d.id, d.data_gara, d.ora, d.squadra_casa, d.squadra_ospite, d.campo, d.competizione,
-                   (SELECT COUNT(*) FROM distinte_gara_righe r WHERE r.distinta_id = d.id AND r.sezione = 'GIOCATORE') AS giocatori
-            FROM distinte_gara d
-            ORDER BY d.data_gara DESC, d.id DESC
-            """,
-            conn,
-        )
-        df_modello = pd.read_sql_query("SELECT nome_file, caricato_il FROM modelli_documenti WHERE nome = 'distinta_gara'", conn)
-    finally:
-        conn.close()
+    df_archivio = leggi_df(
+        """
+        SELECT d.id, d.data_gara, d.ora, d.squadra_casa, d.squadra_ospite, d.campo, d.competizione,
+               (SELECT COUNT(*) FROM distinte_gara_righe r WHERE r.distinta_id = d.id AND r.sezione = 'GIOCATORE') AS giocatori
+        FROM distinte_gara d
+        ORDER BY d.data_gara DESC, d.id DESC
+        """,
+    )
+    df_modello = leggi_df("SELECT nome_file, caricato_il FROM modelli_documenti WHERE nome = 'distinta_gara'")
 
     tab_compila, tab_archivio, tab_modello = st.tabs(["📝 Compila distinta", "📚 Archivio", "⚙️ Modello Word"])
 
@@ -1004,30 +988,25 @@ elif menu == "Distinte di Gara":
         k = f"dist{did}_"
 
         # Dati salvati (modifica) oppure, per una nuova distinta, lo staff dell'ultima distinta come proposta
-        conn = get_ro_conn()
-        try:
-            id_base = did or (int(df_archivio["id"].iloc[0]) if not df_archivio.empty else 0)
-            df_t_sal = pd.read_sql_query("SELECT * FROM distinte_gara WHERE id = ?", conn, params=[did])
-            df_r_sal = pd.read_sql_query("SELECT * FROM distinte_gara_righe WHERE distinta_id = ? ORDER BY ordine", conn, params=[id_base])
-            df_pers = pd.read_sql_query(
-                """
-                SELECT a.id, a.denominazione, a.codice_fiscale, a.tipo_documento, a.numero_documento,
-                       t.numero_tessera, t.numero_scheda_attivita, t.tipo_tessera, t.numero_maglia, t.gioca,
-                       c.data_scadenza, c.stato_idoneita
-                FROM tesserati_calcio t
-                JOIN anagrafiche a ON a.id = t.anagrafica_id
-                LEFT JOIN (
-                    SELECT anagrafica_id, MAX(data_scadenza) AS data_scadenza, stato_idoneita
-                    FROM certificati_medici
-                    GROUP BY anagrafica_id
-                ) c ON c.anagrafica_id = a.id
-                WHERE t.stato = 'ATTIVO'
-                ORDER BY a.denominazione
-                """,
-                conn,
-            ).drop_duplicates("id")
-        finally:
-            conn.close()
+        id_base = did or (int(df_archivio["id"].iloc[0]) if not df_archivio.empty else 0)
+        df_t_sal = leggi_df("SELECT * FROM distinte_gara WHERE id = ?", [did])
+        df_r_sal = leggi_df("SELECT * FROM distinte_gara_righe WHERE distinta_id = ? ORDER BY ordine", [id_base])
+        df_pers = leggi_df(
+            """
+            SELECT a.id, a.denominazione, a.codice_fiscale, a.tipo_documento, a.numero_documento,
+                   t.numero_tessera, t.numero_scheda_attivita, t.tipo_tessera, t.numero_maglia, t.gioca,
+                   c.data_scadenza, c.stato_idoneita
+            FROM tesserati_calcio t
+            JOIN anagrafiche a ON a.id = t.anagrafica_id
+            LEFT JOIN (
+                SELECT anagrafica_id, MAX(data_scadenza) AS data_scadenza, stato_idoneita
+                FROM certificati_medici
+                GROUP BY anagrafica_id
+            ) c ON c.anagrafica_id = a.id
+            WHERE t.stato = 'ATTIVO'
+            ORDER BY a.denominazione
+            """,
+        ).drop_duplicates("id")
 
         testata_sal = {c: valore_pulito(v) for c, v in df_t_sal.iloc[0].items()} if not df_t_sal.empty else {}
         righe_sal = [{c: valore_pulito(v) for c, v in r.items()} for r in df_r_sal.to_dict("records")]
@@ -1297,14 +1276,8 @@ elif menu == "Ricevute Istituzionali (Art. 4)":
                     except Exception as ex_s:
                         st.error(f"Errore durante il salvataggio del socio: {ex_s}")
 
-    conn = get_ro_conn()
-    try:
-        df_soci = pd.read_sql_query(
-            "SELECT id, denominazione, codice_fiscale FROM anagrafiche WHERE tipo IN ('SOCIO_CALCIATORE', 'ALTRO') ORDER BY denominazione",
-            conn
-        )
-    finally:
-        conn.close()
+    df_soci = leggi_df(
+        "SELECT id, denominazione, codice_fiscale FROM anagrafiche WHERE tipo IN ('SOCIO_CALCIATORE', 'ALTRO') ORDER BY denominazione")
 
     if not df_soci.empty:
         st.markdown("### 📝 Nuova Ricevuta di Incasso")
@@ -1315,11 +1288,7 @@ elif menu == "Ricevute Istituzionali (Art. 4)":
             data_ric = col1.date_input("Data Emissione")
             anno_ric = str(data_ric.year)
 
-            conn = get_ro_conn()
-            try:
-                next_num = prossimo_numero(conn, "ricevute_istituzionali", "numero_ricevuta", "data_emissione", anno_ric)
-            finally:
-                conn.close()
+            next_num = prossimo_numero("ricevute_istituzionali", "numero_ricevuta", "data_emissione", anno_ric)
 
             num_ric = col2.text_input("Numero Ricevuta (Progressivo automatico)", value=f"{next_num}/{anno_ric}")
             socio_sel = col3.selectbox("Socio / Tesserato / Versante", list(soci_dict.keys()))
@@ -1374,21 +1343,15 @@ elif menu == "Ricevute Istituzionali (Art. 4)":
 
     st.divider()
     st.markdown("### 📖 Registro Ricevute Istituzionali Emesse")
-    conn = get_ro_conn()
-    try:
-        df_ric = pd.read_sql_query(
-            """
-            SELECT r.numero_ricevuta as 'N. Ricevuta', r.data_emissione as Data, a.denominazione as Socio, 
-                   r.causale as Causale, r.importo as 'Importo (€)', r.modalita_pagamento as Pagamento, r.marca_da_bollo as 'Bollo (€)'
-            FROM ricevute_istituzionali r
-            JOIN anagrafiche a ON r.anagrafica_id = a.id
-            ORDER BY r.id DESC
-            """,
-            conn
-        )
-        st.dataframe(df_ric, width="stretch")
-    finally:
-        conn.close()
+    df_ric = leggi_df(
+        """
+        SELECT r.numero_ricevuta as 'N. Ricevuta', r.data_emissione as Data, a.denominazione as Socio, 
+               r.causale as Causale, r.importo as 'Importo (€)', r.modalita_pagamento as Pagamento, r.marca_da_bollo as 'Bollo (€)'
+        FROM ricevute_istituzionali r
+        JOIN anagrafiche a ON r.anagrafica_id = a.id
+        ORDER BY r.id DESC
+        """)
+    st.dataframe(df_ric, width="stretch")
 
 # ---------------------------------------------------------
 # 4. SPONSOR & PUBBLICITÀ (REGIME LEGGE 398/91)
@@ -1415,11 +1378,7 @@ elif menu == "Sponsor & Pubblicità (398/91)":
                     except Exception as ex_sp:
                         st.error(f"Errore durante il salvataggio dello sponsor: {ex_sp}")
 
-    conn = get_ro_conn()
-    try:
-        df_sponsor = pd.read_sql_query("SELECT id, denominazione FROM anagrafiche WHERE tipo='SPONSOR' ORDER BY denominazione", conn)
-    finally:
-        conn.close()
+    df_sponsor = leggi_df("SELECT id, denominazione FROM anagrafiche WHERE tipo='SPONSOR' ORDER BY denominazione")
 
     if not df_sponsor.empty:
         st.markdown("### 📝 Registrazione Fattura Emessa allo Sponsor")
@@ -1430,11 +1389,7 @@ elif menu == "Sponsor & Pubblicità (398/91)":
             data_fat = col2.date_input("Data Fattura")
             anno_fat = str(data_fat.year)
 
-            conn = get_ro_conn()
-            try:
-                next_fat_num = prossimo_numero(conn, "fatture_sponsor_398", "numero_fattura", "data_fattura", anno_fat)
-            finally:
-                conn.close()
+            next_fat_num = prossimo_numero("fatture_sponsor_398", "numero_fattura", "data_fattura", anno_fat)
 
             num_fat = col1.text_input("Numero Fattura", value=f"{next_fat_num}/{anno_fat}/398")
             spon_sel = col3.selectbox("Azienda Sponsor", list(spon_dict.keys()))
@@ -1484,22 +1439,16 @@ elif menu == "Sponsor & Pubblicità (398/91)":
 
     st.divider()
     st.markdown("### 📖 Registro Cronologico Sponsorizzazioni (D.M. 11/02/1997)")
-    conn = get_ro_conn()
-    try:
-        df_reg398 = pd.read_sql_query(
-            """
-            SELECT f.numero_fattura as N_Doc, f.data_fattura as Data, s.denominazione as Sponsor, 
-                   f.imponibile as 'Imponibile (€)', f.iva_totale as 'IVA 22% (€)', f.totale_fattura as 'Totale (€)',
-                   f.iva_da_versare_50 as 'IVA 50% Erario (€)', f.stima_ires_3 as 'Stima IRES 24% su 3% (€)'
-            FROM fatture_sponsor_398 f
-            JOIN anagrafiche s ON f.sponsor_id = s.id
-            ORDER BY f.id DESC
-            """,
-            conn
-        )
-        st.dataframe(df_reg398, width="stretch")
-    finally:
-        conn.close()
+    df_reg398 = leggi_df(
+        """
+        SELECT f.numero_fattura as N_Doc, f.data_fattura as Data, s.denominazione as Sponsor, 
+               f.imponibile as 'Imponibile (€)', f.iva_totale as 'IVA 22% (€)', f.totale_fattura as 'Totale (€)',
+               f.iva_da_versare_50 as 'IVA 50% Erario (€)', f.stima_ires_3 as 'Stima IRES 24% su 3% (€)'
+        FROM fatture_sponsor_398 f
+        JOIN anagrafiche s ON f.sponsor_id = s.id
+        ORDER BY f.id DESC
+        """)
+    st.dataframe(df_reg398, width="stretch")
 
 # ---------------------------------------------------------
 # 5. LAVORO SPORTIVO & RIMBORSI (D.LGS. 36/2021)
@@ -1510,14 +1459,8 @@ elif menu == "Lavoro Sportivo & Rimborsi (D.Lgs. 36)":
     tab_comp, tab_rimb = st.tabs(["Compensi Collaboratori Sportivi", "Rimborsi Spesa Trasferta Partite"])
 
     with tab_comp:
-        conn = get_ro_conn()
-        try:
-            df_staff = pd.read_sql_query(
-                "SELECT c.id, a.denominazione, c.mansione, c.tipo_contratto FROM collaboratori_sportivi c JOIN anagrafiche a ON c.anagrafica_id = a.id ORDER BY a.denominazione",
-                conn
-            )
-        finally:
-            conn.close()
+        df_staff = leggi_df(
+            "SELECT c.id, a.denominazione, c.mansione, c.tipo_contratto FROM collaboratori_sportivi c JOIN anagrafiche a ON c.anagrafica_id = a.id ORDER BY a.denominazione")
 
         if not df_staff.empty:
             staff_dict = {f"{row['denominazione']} ({row['mansione']})": int(row["id"]) for _, row in df_staff.iterrows()}
@@ -1574,11 +1517,7 @@ elif menu == "Lavoro Sportivo & Rimborsi (D.Lgs. 36)":
             st.warning("Registra prima un collaboratore sportivo nell'Anagrafica prima di poter erogare compensi.")
 
     with tab_rimb:
-        conn = get_ro_conn()
-        try:
-            df_anag_sport = pd.read_sql_query("SELECT id, denominazione FROM anagrafiche WHERE tipo IN ('SOCIO_CALCIATORE', 'ALTRO') ORDER BY denominazione", conn)
-        finally:
-            conn.close()
+        df_anag_sport = leggi_df("SELECT id, denominazione FROM anagrafiche WHERE tipo IN ('SOCIO_CALCIATORE', 'ALTRO') ORDER BY denominazione")
 
         if not df_anag_sport.empty:
             a_dict = {row["denominazione"]: int(row["id"]) for _, row in df_anag_sport.iterrows()}
@@ -1653,17 +1592,28 @@ elif menu == "Riconciliazione Estratti Conto":
                 if st.button("💾 Salva e Importa Movimenti nel Database"):
                     clean_df = edited_df.dropna(subset=["data_transazione", "importo_lordo"])
                     saved_count = 0
+                    doppi = 0
                     fonte_str = "PAYPAL" if "PayPal" in tipo_fonte else "BANCA"
+                    numero = lambda v: 0.0 if v is None or pd.isna(v) else float(v)  # celle vuote dell'editor = 0
 
                     try:
                         with db_write() as w_conn:
                             for _, row in clean_df.iterrows():
                                 d_trans = str(row["data_transazione"]).strip()
                                 desc_t = str(row["descrizione"]).strip()
-                                imp_l = float(row["importo_lordo"] or 0)
-                                comm_t = float(row.get("commissione", 0) or 0)
-                                imp_n = float(row["importo_netto"] or (imp_l - comm_t))
-                                st_ric = str(row.get("stato_riconciliazione", "DA_RICONCILIARE"))
+                                imp_l = numero(row["importo_lordo"])
+                                comm_t = numero(row.get("commissione"))
+                                imp_n = imp_l - comm_t if pd.isna(row.get("importo_netto")) else float(row["importo_netto"])
+                                st_ric = str(row.get("stato_riconciliazione") or "DA_RICONCILIARE")
+
+                                # Lo stesso estratto conto caricato due volte non deve duplicare i movimenti
+                                gia_presente = w_conn.execute(
+                                    "SELECT COUNT(*) FROM estratti_conto_importati WHERE fonte = ? AND data_transazione = ? AND descrizione = ? AND ROUND(importo_lordo, 2) = ROUND(?, 2)",
+                                    [fonte_str, d_trans, desc_t, imp_l]
+                                ).fetchone()[0]
+                                if gia_presente:
+                                    doppi += 1
+                                    continue
 
                                 w_conn.execute(
                                     "INSERT INTO estratti_conto_importati (fonte, data_transazione, descrizione, importo_lordo, commissione, importo_netto, stato_riconciliazione) "
@@ -1672,7 +1622,8 @@ elif menu == "Riconciliazione Estratti Conto":
                                 )
                                 saved_count += 1
 
-                        st.session_state["flash"] = f"🎉 Salvati con successo **{saved_count}** movimenti bancari nel database!"
+                        st.session_state["flash"] = f"🎉 Salvati **{saved_count}** movimenti nel database." + (
+                            f" {doppi} erano già presenti e non sono stati duplicati." if doppi else "")
                         st.rerun()
                     except Exception as ex_imp:
                         st.error(f"Errore durante l'importazione dell'estratto conto: {ex_imp}")
@@ -1681,18 +1632,14 @@ elif menu == "Riconciliazione Estratti Conto":
         st.markdown("### 📖 Movimenti Salvati in Archivio")
         filtro_stato = st.selectbox("Filtra per Stato Riconciliazione", ["TUTTI", "DA_RICONCILIARE", "RICONCILIATO"])
 
-        conn = get_ro_conn()
-        try:
-            query_str = "SELECT id, fonte as Fonte, data_transazione as Data, descrizione as Descrizione, importo_lordo as 'Lordo (€)', commissione as 'Commissione (€)', importo_netto as 'Netto (€)', stato_riconciliazione as Stato FROM estratti_conto_importati"
-            params = []
-            if filtro_stato != "TUTTI":
-                query_str += " WHERE stato_riconciliazione = ?"
-                params.append(filtro_stato)
-            query_str += " ORDER BY id DESC LIMIT 500"
+        query_str = "SELECT id, fonte as Fonte, data_transazione as Data, descrizione as Descrizione, importo_lordo as 'Lordo (€)', commissione as 'Commissione (€)', importo_netto as 'Netto (€)', stato_riconciliazione as Stato FROM estratti_conto_importati"
+        params = []
+        if filtro_stato != "TUTTI":
+            query_str += " WHERE stato_riconciliazione = ?"
+            params.append(filtro_stato)
+        query_str += " ORDER BY id DESC LIMIT 500"
 
-            df_db_saved = pd.read_sql_query(query_str, conn, params=params)
-        finally:
-            conn.close()
+        df_db_saved = leggi_df(query_str, params)
 
         if not df_db_saved.empty:
             st.dataframe(df_db_saved, width="stretch")
@@ -1769,11 +1716,7 @@ elif menu == "Prima Nota & Rendiconto ASD":
 
     with tab_giornale:
         with st.expander("➕ Nuova Registrazione Manuale (Uscite / Spese / Incassi Generici)"):
-            conn = get_ro_conn()
-            try:
-                df_pdc = pd.read_sql_query("SELECT id, codice || ' - ' || nome as conto FROM piano_dei_conti WHERE livello = 3 ORDER BY codice", conn)
-            finally:
-                conn.close()
+            df_pdc = leggi_df("SELECT id, codice || ' - ' || nome as conto FROM piano_dei_conti WHERE livello = 3 ORDER BY codice")
 
             pdc_dict = {row["conto"]: int(row["id"]) for _, row in df_pdc.iterrows()}
 
@@ -1812,44 +1755,46 @@ elif menu == "Prima Nota & Rendiconto ASD":
                             st.error(f"Errore durante il salvataggio in Prima Nota: {ex_pn}")
 
         st.divider()
-        conn = get_ro_conn()
-        try:
-            df_pn = pd.read_sql_query(
-                """
-                SELECT m.data_registrazione as Data, m.numero_documento as Doc, m.causale as Causale, 
-                       m.tipo_attivita as Attività, p.codice || ' - ' || p.nome as Sottoconto, 
-                       r.dare as 'Dare (€)', r.avere as 'Avere (€)'
-                FROM righe_prima_nota r
-                JOIN movimenti_prima_nota m ON r.movimento_id = m.id
-                JOIN piano_dei_conti p ON r.sottoconto_id = p.id
-                ORDER BY m.id DESC, r.id ASC LIMIT 500
-                """,
-                conn
-            )
-            st.dataframe(df_pn, width="stretch")
-        finally:
-            conn.close()
+        df_pn = leggi_df(
+            """
+            SELECT m.data_registrazione as Data, m.numero_documento as Doc, m.causale as Causale, 
+                   m.tipo_attivita as Attività, p.codice || ' - ' || p.nome as Sottoconto, 
+                   r.dare as 'Dare (€)', r.avere as 'Avere (€)'
+            FROM righe_prima_nota r
+            JOIN movimenti_prima_nota m ON r.movimento_id = m.id
+            JOIN piano_dei_conti p ON r.sottoconto_id = p.id
+            ORDER BY m.id DESC, r.id ASC LIMIT 500
+            """)
+        st.dataframe(df_pn, width="stretch")
 
     with tab_rendiconto:
         st.markdown("### 🏛️ Rendiconto Economico-Finanziario Annuale")
-        conn = get_ro_conn()
-        try:
-            df_rend = pd.read_sql_query(
-                """
-                SELECT p.tipo, p.codice, p.nome, 
-                       COALESCE(SUM(r.dare), 0.0) as Tot_Dare, COALESCE(SUM(r.avere), 0.0) as Tot_Avere
-                FROM piano_dei_conti p
-                LEFT JOIN righe_prima_nota r ON p.id = r.sottoconto_id
-                WHERE p.livello = 3 AND p.tipo IN ('COSTO', 'RICAVO')
-                GROUP BY p.id, p.tipo, p.codice, p.nome
-                HAVING COALESCE(SUM(r.dare), 0.0) > 0 OR COALESCE(SUM(r.avere), 0.0) > 0
-                ORDER BY p.codice
-                """,
-                conn
-            )
-            st.dataframe(df_rend, width="stretch")
-        finally:
-            conn.close()
+        anni_pn = leggi_df("SELECT DISTINCT strftime('%Y', data_registrazione) AS anno FROM movimenti_prima_nota WHERE data_registrazione IS NOT NULL")
+        anni = sorted(set(anni_pn["anno"].dropna().tolist()) | {str(datetime.date.today().year)}, reverse=True)
+        anno_rend = st.selectbox("Anno", anni)
+        df_rend = leggi_df(
+            """
+            SELECT p.tipo, p.codice, p.nome,
+                   COALESCE(SUM(x.dare), 0.0) as Tot_Dare, COALESCE(SUM(x.avere), 0.0) as Tot_Avere
+            FROM piano_dei_conti p
+            LEFT JOIN (
+                SELECT r.sottoconto_id, r.dare, r.avere
+                FROM righe_prima_nota r
+                JOIN movimenti_prima_nota m ON m.id = r.movimento_id
+                WHERE strftime('%Y', m.data_registrazione) = ?
+            ) x ON p.id = x.sottoconto_id
+            WHERE p.livello = 3 AND p.tipo IN ('COSTO', 'RICAVO')
+            GROUP BY p.id, p.tipo, p.codice, p.nome
+            HAVING COALESCE(SUM(x.dare), 0.0) > 0 OR COALESCE(SUM(x.avere), 0.0) > 0
+            ORDER BY p.codice
+            """, [anno_rend])
+        tot_costi = float((df_rend.loc[df_rend["tipo"] == "COSTO", "Tot_Dare"] - df_rend.loc[df_rend["tipo"] == "COSTO", "Tot_Avere"]).sum())
+        tot_ricavi = float((df_rend.loc[df_rend["tipo"] == "RICAVO", "Tot_Avere"] - df_rend.loc[df_rend["tipo"] == "RICAVO", "Tot_Dare"]).sum())
+        r1, r2, r3 = st.columns(3)
+        r1.metric(f"Ricavi {anno_rend}", f"€ {tot_ricavi:,.2f}")
+        r2.metric(f"Costi {anno_rend}", f"€ {tot_costi:,.2f}")
+        r3.metric("Avanzo / Disavanzo", f"€ {tot_ricavi - tot_costi:,.2f}")
+        st.dataframe(df_rend, width="stretch")
 
 # ---------------------------------------------------------
 # 8. PIANO DEI CONTI ASD
@@ -1873,9 +1818,5 @@ elif menu == "Piano dei Conti ASD":
         except Exception as ex_pdc:
             st.error(f"Errore durante il ripopolamento del Piano dei Conti: {ex_pdc}")
 
-    conn = get_ro_conn()
-    try:
-        df_pdc = pd.read_sql_query("SELECT codice, nome, tipo, livello FROM piano_dei_conti ORDER BY codice", conn)
-        st.dataframe(df_pdc, width="stretch")
-    finally:
-        conn.close()
+    df_pdc = leggi_df("SELECT codice, nome, tipo, livello FROM piano_dei_conti ORDER BY codice")
+    st.dataframe(df_pdc, width="stretch")
