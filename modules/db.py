@@ -384,6 +384,54 @@ def init_db():
     );
     """)
 
+    # 14. Impostazioni generali modificabili dall'app (es. mese di inizio dell'esercizio)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS impostazioni (
+        chiave TEXT PRIMARY KEY,
+        valore TEXT
+    );
+    """)
+
+    # 15. Apertura dell'esercizio: una sola per esercizio, collegata alla scrittura di prima nota
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS aperture_esercizio (
+        esercizio TEXT PRIMARY KEY,
+        data_apertura TEXT NOT NULL,
+        movimento_id INTEGER REFERENCES movimenti_prima_nota(id),
+        creata_il TEXT
+    );
+    """)
+    # Dettaglio dei crediti da incassare all'apertura (quote dei soci, sponsor non ancora saldati)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS crediti_apertura (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        esercizio TEXT NOT NULL,
+        anagrafica_id INTEGER NOT NULL REFERENCES anagrafiche(id),
+        tipo TEXT NOT NULL CHECK(tipo IN ('SOCIO', 'SPONSOR')),
+        importo REAL NOT NULL,
+        descrizione TEXT
+    );
+    """)
+
+    # 16. Incassi dagli sponsor (pagamento delle fatture o dei crediti di apertura)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS incassi_sponsor (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        sponsor_id INTEGER NOT NULL REFERENCES anagrafiche(id),
+        data_incasso TEXT NOT NULL,
+        importo REAL NOT NULL,
+        modalita_pagamento TEXT,
+        riferimento TEXT,
+        movimento_id INTEGER REFERENCES movimenti_prima_nota(id)
+    );
+    """)
+
+    # Migrazione: ricevuta che incassa un credito degli esercizi precedenti (non è un nuovo ricavo)
+    try:
+        cursor.execute("ALTER TABLE ricevute_istituzionali ADD COLUMN credito_pregresso INTEGER NOT NULL DEFAULT 0;")
+    except Exception:
+        pass  # colonna già presente
+
     # Migrazioni per le distinte: documento d'identità in anagrafica, tipo di tessera (es. A, D, D/A) e maglia abituale
     for alter_sql in (
         "ALTER TABLE anagrafiche ADD COLUMN tipo_documento TEXT;",

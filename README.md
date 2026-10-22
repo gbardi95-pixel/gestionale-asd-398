@@ -7,10 +7,11 @@ Applicazione web (Streamlit) per la gestione amministrativa e sportiva di un'ass
 - **Dashboard**: tesserati attivi, quote incassate, ricavi sponsor e IVA 398 dell'anno, avvisi sui certificati medici di chi gioca.
 - **Soci, atleti e dirigenza**: anagrafica con tessera e scheda attività, tipo di tessera, maglia abituale, documento d'identità, certificato medico, indicazione di chi gioca; importazione da Excel e aggiornamento dall'export CSV dell'ente di tesseramento con anteprima.
 - **Distinte di gara**: selezione dei giocatori che possono giocare alla data della gara (tessera e certificato valido), staff, archivio delle distinte e stampa su modello Word personalizzabile.
-- **Ricevute istituzionali** (art. 4 DPR 633/72) e **fatture sponsor 398/91** con registrazione automatica in prima nota.
+- **Ricevute istituzionali** (art. 4 DPR 633/72), **fatture sponsor 398/91** e **incassi dagli sponsor** con registrazione automatica in prima nota.
 - **Lavoro sportivo** (D.Lgs. 36/2021): compensi con franchigie e rimborsi trasferta.
 - **Riconciliazione estratti conto** banca e PayPal (CSV / Excel).
-- **Prima nota in partita doppia**, rendiconto economico annuale e piano dei conti.
+- **Prima nota in partita doppia**, rendiconto economico per esercizio e piano dei conti.
+- **Esercizio sociale** su anno solare o stagione sportiva (mese di inizio impostabile) e **apertura dell'esercizio**: saldi di banca, PayPal e cassa, debiti, quote dei soci e sponsorizzazioni ancora da incassare; i valori si possono riprendere dai saldi di chiusura dell'esercizio precedente.
 
 ## Installazione
 

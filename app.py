@@ -8,7 +8,7 @@ import warnings
 import pandas as pd
 import streamlit as st
 from contextlib import contextmanager
-from modules import distinte, tesseramento
+from modules import distinte, esercizio, tesseramento
 from modules.db import PIANO_DEI_CONTI_ASD, get_connection, init_db, usa_turso
 
 # ---------------------------------------------------------
@@ -16,7 +16,7 @@ from modules.db import PIANO_DEI_CONTI_ASD, get_connection, init_db, usa_turso
 # ---------------------------------------------------------
 # Incrementare a ogni modifica dello schema del DB: forza init_db() (e le migrazioni)
 # anche quando Streamlit Cloud aggiorna il codice senza riavviare il server.
-VERSIONE_SCHEMA_DB = 6
+VERSIONE_SCHEMA_DB = 7
 
 @st.cache_resource
 def _setup_database(versione_schema):
@@ -256,6 +256,61 @@ def post_journal(conn, data_reg, num_doc, causale, tipo_att, righe):
             "VALUES (?, ?, ?, ?, ?)",
             [int(mov_id), int(acc_id), str(desc).strip(), float(dare), float(avere)]
         )
+    return int(mov_id)
+
+def mese_inizio_esercizio():
+    """Mese di inizio dell'esercizio sociale (1 = anno solare, 7 = stagione sportiva 1/7-30/6), impostabile dall'app."""
+    df = leggi_df("SELECT valore FROM impostazioni WHERE chiave = 'mese_inizio_esercizio'")
+    try:
+        return int(df["valore"].iloc[0]) if not df.empty else 1
+    except (TypeError, ValueError):
+        return 1
+
+def esercizio_corrente():
+    """(inizio, fine, etichetta) dell'esercizio in corso oggi."""
+    return esercizio.periodo_esercizio(datetime.date.today(), mese_inizio_esercizio())
+
+def saldi_conti_prima_del(data):
+    """Saldo (dare - avere) di ogni conto con i movimenti registrati prima della data indicata."""
+    df = leggi_df(
+        """
+        SELECT p.codice, COALESCE(SUM(r.dare), 0) - COALESCE(SUM(r.avere), 0) AS saldo
+        FROM righe_prima_nota r
+        JOIN movimenti_prima_nota m ON m.id = r.movimento_id
+        JOIN piano_dei_conti p ON p.id = r.sottoconto_id
+        WHERE m.data_registrazione < ?
+        GROUP BY p.codice
+        """, [str(data)])
+    return {r.codice: round(float(r.saldo), 2) for r in df.itertuples()}
+
+def crediti_residui(etichetta, inizio, fine, tipo):
+    """Crediti ancora da incassare a fine esercizio, persona per persona (tipo SOCIO) o sponsor per sponsor (tipo SPONSOR).
+
+    SOCIO: crediti di apertura meno le ricevute che incassano quote pregresse.
+    SPONSOR: crediti di apertura più fatture dell'esercizio meno incassi dell'esercizio.
+    """
+    if tipo == "SOCIO":
+        sql = """
+            SELECT a.id AS anagrafica_id, a.denominazione,
+                   COALESCE((SELECT SUM(importo) FROM crediti_apertura c WHERE c.anagrafica_id = a.id AND c.tipo = 'SOCIO' AND c.esercizio = ?), 0) AS iniziale,
+                   0.0 AS addebitato,
+                   COALESCE((SELECT SUM(importo) FROM ricevute_istituzionali r WHERE r.anagrafica_id = a.id AND r.credito_pregresso = 1
+                             AND r.data_emissione BETWEEN ? AND ?), 0) AS incassato
+            FROM anagrafiche a
+            """
+        params = [etichetta, str(inizio), str(fine)]
+    else:
+        sql = """
+            SELECT a.id AS anagrafica_id, a.denominazione,
+                   COALESCE((SELECT SUM(importo) FROM crediti_apertura c WHERE c.anagrafica_id = a.id AND c.tipo = 'SPONSOR' AND c.esercizio = ?), 0) AS iniziale,
+                   COALESCE((SELECT SUM(totale_fattura) FROM fatture_sponsor_398 f WHERE f.sponsor_id = a.id AND f.data_fattura BETWEEN ? AND ?), 0) AS addebitato,
+                   COALESCE((SELECT SUM(importo) FROM incassi_sponsor i WHERE i.sponsor_id = a.id AND i.data_incasso BETWEEN ? AND ?), 0) AS incassato
+            FROM anagrafiche a
+            """
+        params = [etichetta, str(inizio), str(fine), str(inizio), str(fine)]
+    df = leggi_df(sql, params)
+    df["residuo"] = (df["iniziale"] + df["addebitato"] - df["incassato"]).round(2)
+    return df[(df["iniziale"] != 0) | (df["addebitato"] != 0) | (df["incassato"] != 0)].sort_values("denominazione").reset_index(drop=True)
 
 # ---------------------------------------------------------
 # FUNZIONE PARSER ESTRATTO CONTO ROBUSTO (CSV / EXCEL)
@@ -1299,6 +1354,9 @@ elif menu == "Ricevute Istituzionali (Art. 4)":
             importo = c6.number_input("Importo Incassato (€)", min_value=0.01, step=10.0)
 
             pagamento = st.selectbox("Modalità Pagamento", ["BONIFICO", "POS", "PAYPAL", "CONTANTI"])
+            pregresso = st.checkbox(
+                "Incasso di una quota degli esercizi precedenti (già inserita tra i crediti di apertura)",
+                help="La ricevuta riduce il credito verso il socio invece di registrare un nuovo ricavo, che è già stato contato nell'esercizio in cui la quota era dovuta.")
 
             if st.form_submit_button("Emetti Ricevuta e Registra in Prima Nota"):
                 if importo > 0:
@@ -1307,6 +1365,8 @@ elif menu == "Ricevute Istituzionali (Art. 4)":
                     # BONIFICO e POS vanno in banca, PAYPAL sul conto PayPal, CONTANTI in cassa
                     cod_cassa_banca = {"BONIFICO": "10.01.001", "POS": "10.01.001", "PAYPAL": "10.01.003"}.get(pagamento, "10.01.002")
                     cod_ricavo = "50.01.001" if "Annua" in tipo_causale else "50.01.002"
+                    if pregresso:
+                        cod_ricavo = esercizio.CONTO_CREDITI_SOCI  # si incassa un credito, non un nuovo ricavo
 
                     try:
                         conn = get_ro_conn()
@@ -1321,14 +1381,15 @@ elif menu == "Ricevute Istituzionali (Art. 4)":
 
                         with db_write() as w_conn:
                             w_conn.execute(
-                                "INSERT INTO ricevute_istituzionali (numero_ricevuta, data_emissione, anagrafica_id, causale, importo, modalita_pagamento, marca_da_bollo) "
-                                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                                [str(num_ric).strip(), str(data_ric), int(soci_dict[socio_sel]), str(causale_completa).strip(), float(importo), str(pagamento), float(bollo)]
+                                "INSERT INTO ricevute_istituzionali (numero_ricevuta, data_emissione, anagrafica_id, causale, importo, modalita_pagamento, marca_da_bollo, credito_pregresso) "
+                                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                                [str(num_ric).strip(), str(data_ric), int(soci_dict[socio_sel]), str(causale_completa).strip(), float(importo), str(pagamento),
+                                 float(bollo), int(pregresso)]
                             )
 
                             righe_journal = [
                                 (acc_fin, f"Incasso {tipo_causale}", float(importo), 0.0),
-                                (acc_ric, "Ricavo Istituzionale", 0.0, float(importo))
+                                (acc_ric, "Incasso credito verso socio" if pregresso else "Ricavo Istituzionale", 0.0, float(importo))
                             ]
                             post_journal(w_conn, data_ric, num_ric, f"Incasso {tipo_causale} - {socio_sel}", "ISTITUZIONALE", righe_journal)
 
@@ -1340,6 +1401,15 @@ elif menu == "Ricevute Istituzionali (Art. 4)":
                     st.error("Inserisci un importo valido maggiore di zero.")
     else:
         st.info("Nessun socio presente in anagrafica. Registra un nuovo socio per emettere le ricevute.")
+
+    ini_ec, fin_ec, etich_ec = esercizio_corrente()
+    df_res_soci = crediti_residui(etich_ec, ini_ec, fin_ec, "SOCIO")
+    if not df_res_soci.empty:
+        with st.expander(f"💰 Quote degli esercizi precedenti da incassare (esercizio {etich_ec}): € {df_res_soci['residuo'].clip(lower=0).sum():,.2f}"):
+            st.caption("Crediti inseriti nell'apertura dell'esercizio, meno le ricevute emesse come «incasso di una quota degli esercizi precedenti».")
+            st.dataframe(df_res_soci.rename(columns={"denominazione": "Socio", "iniziale": "Credito iniziale (€)", "incassato": "Incassato (€)",
+                                                     "residuo": "Da incassare (€)"}).drop(columns=["anagrafica_id", "addebitato"]),
+                         width="stretch", hide_index=True)
 
     st.divider()
     st.markdown("### 📖 Registro Ricevute Istituzionali Emesse")
@@ -1436,6 +1506,41 @@ elif menu == "Sponsor & Pubblicità (398/91)":
                         st.rerun()
                     except Exception as ex_fat:
                         st.error(f"Errore durante la registrazione della fattura: {ex_fat}")
+
+        # Incasso del pagamento: chiude il credito verso lo sponsor (fatture dell'esercizio o crediti di apertura)
+        st.markdown("### 💶 Incasso da Sponsor")
+        ini_ec, fin_ec, etich_ec = esercizio_corrente()
+        if leggi_df("SELECT COUNT(*) AS n FROM aperture_esercizio WHERE esercizio = ?", [etich_ec])["n"].iloc[0] == 0:
+            st.caption(f"ℹ️ L'esercizio {etich_ec} non è ancora stato aperto (Prima Nota → Apertura esercizio): "
+                       "i crediti verso sponsor degli anni precedenti non sono conteggiati.")
+        df_res_sp = crediti_residui(etich_ec, ini_ec, fin_ec, "SPONSOR")
+        if not df_res_sp.empty:
+            st.dataframe(df_res_sp.rename(columns={"denominazione": "Sponsor", "iniziale": "Credito di apertura (€)", "addebitato": "Fatturato (€)",
+                                                   "incassato": "Incassato (€)", "residuo": "Da incassare (€)"}).drop(columns=["anagrafica_id"]),
+                         width="stretch", hide_index=True)
+            st.caption(f"Esercizio {etich_ec}: credito di apertura + fatture emesse nell'esercizio − incassi registrati.")
+        with st.form("incasso_sponsor", clear_on_submit=True):
+            i1, i2, i3, i4 = st.columns(4)
+            spon_inc = i1.selectbox("Sponsor", list(spon_dict.keys()), key="inc_sponsor")
+            data_inc = i2.date_input("Data incasso", format="DD/MM/YYYY")
+            importo_inc = i3.number_input("Importo incassato (€)", min_value=0.01, step=50.0)
+            modo_inc = i4.selectbox("Modalità", ["BONIFICO", "POS", "PAYPAL", "CONTANTI"])
+            rif_inc = st.text_input("Riferimento (es. saldo fattura n. ...)")
+            if st.form_submit_button("Registra incasso"):
+                try:
+                    with db_write() as w_conn:
+                        acc_fin = get_conto_id(w_conn, {"BONIFICO": "10.01.001", "POS": "10.01.001", "PAYPAL": "10.01.003"}.get(modo_inc, "10.01.002"))
+                        acc_cred = get_conto_id(w_conn, esercizio.CONTO_CREDITI_SPONSOR)
+                        mov_id = post_journal(w_conn, data_inc, rif_inc or "Incasso sponsor", f"Incasso da sponsor {spon_inc}", "COMMERCIALE_398",
+                                              [(acc_fin, f"Incasso {spon_inc}", float(importo_inc), 0.0),
+                                               (acc_cred, f"Credito v/Sponsor {spon_inc}", 0.0, float(importo_inc))])
+                        w_conn.execute(
+                            "INSERT INTO incassi_sponsor (sponsor_id, data_incasso, importo, modalita_pagamento, riferimento, movimento_id) VALUES (?, ?, ?, ?, ?, ?)",
+                            [int(spon_dict[spon_inc]), str(data_inc), float(importo_inc), modo_inc, rif_inc.strip() or None, mov_id])
+                    st.session_state["flash"] = f"Incasso di € {importo_inc:,.2f} da {spon_inc} registrato."
+                    st.rerun()
+                except Exception as ex_inc:
+                    st.error(f"Errore durante la registrazione dell'incasso: {ex_inc}")
 
     st.divider()
     st.markdown("### 📖 Registro Cronologico Sponsorizzazioni (D.M. 11/02/1997)")
@@ -1712,7 +1817,7 @@ elif menu == "Riconciliazione Estratti Conto":
 elif menu == "Prima Nota & Rendiconto ASD":
     st.subheader("📖 Giornale di Prima Nota e Rendiconto Economico Finanziario ASD")
 
-    tab_giornale, tab_rendiconto = st.tabs(["Giornale di Prima Nota (Partita Doppia)", "Rendiconto Economico Finanziario"])
+    tab_giornale, tab_rendiconto, tab_apertura = st.tabs(["Giornale di Prima Nota (Partita Doppia)", "Rendiconto Economico Finanziario", "📂 Apertura esercizio"])
 
     with tab_giornale:
         with st.expander("➕ Nuova Registrazione Manuale (Uscite / Spese / Incassi Generici)"):
@@ -1768,10 +1873,16 @@ elif menu == "Prima Nota & Rendiconto ASD":
         st.dataframe(df_pn, width="stretch")
 
     with tab_rendiconto:
-        st.markdown("### 🏛️ Rendiconto Economico-Finanziario Annuale")
-        anni_pn = leggi_df("SELECT DISTINCT strftime('%Y', data_registrazione) AS anno FROM movimenti_prima_nota WHERE data_registrazione IS NOT NULL")
-        anni = sorted(set(anni_pn["anno"].dropna().tolist()) | {str(datetime.date.today().year)}, reverse=True)
-        anno_rend = st.selectbox("Anno", anni)
+        st.markdown("### 🏛️ Rendiconto Economico-Finanziario dell'Esercizio")
+        mese_ini_rend = mese_inizio_esercizio()
+        date_pn = leggi_df("SELECT DISTINCT data_registrazione FROM movimenti_prima_nota WHERE data_registrazione IS NOT NULL")
+        periodi_rend = {esercizio_corrente()[2]: esercizio_corrente()[:2]}
+        for d in pd.to_datetime(date_pn["data_registrazione"], errors="coerce").dropna():
+            ini_r, fin_r, etich_r = esercizio.periodo_esercizio(d.date(), mese_ini_rend)
+            periodi_rend.setdefault(etich_r, (ini_r, fin_r))
+        anno_rend = st.selectbox("Esercizio", sorted(periodi_rend, reverse=True))
+        ini_rend, fin_rend = periodi_rend[anno_rend]
+        st.caption(f"Dal {ini_rend.strftime('%d/%m/%Y')} al {fin_rend.strftime('%d/%m/%Y')}.")
         df_rend = leggi_df(
             """
             SELECT p.tipo, p.codice, p.nome,
@@ -1781,13 +1892,13 @@ elif menu == "Prima Nota & Rendiconto ASD":
                 SELECT r.sottoconto_id, r.dare, r.avere
                 FROM righe_prima_nota r
                 JOIN movimenti_prima_nota m ON m.id = r.movimento_id
-                WHERE strftime('%Y', m.data_registrazione) = ?
+                WHERE m.data_registrazione BETWEEN ? AND ?
             ) x ON p.id = x.sottoconto_id
             WHERE p.livello = 3 AND p.tipo IN ('COSTO', 'RICAVO')
             GROUP BY p.id, p.tipo, p.codice, p.nome
             HAVING COALESCE(SUM(x.dare), 0.0) > 0 OR COALESCE(SUM(x.avere), 0.0) > 0
             ORDER BY p.codice
-            """, [anno_rend])
+            """, [str(ini_rend), str(fin_rend)])
         tot_costi = float((df_rend.loc[df_rend["tipo"] == "COSTO", "Tot_Dare"] - df_rend.loc[df_rend["tipo"] == "COSTO", "Tot_Avere"]).sum())
         tot_ricavi = float((df_rend.loc[df_rend["tipo"] == "RICAVO", "Tot_Avere"] - df_rend.loc[df_rend["tipo"] == "RICAVO", "Tot_Dare"]).sum())
         r1, r2, r3 = st.columns(3)
@@ -1795,6 +1906,165 @@ elif menu == "Prima Nota & Rendiconto ASD":
         r2.metric(f"Costi {anno_rend}", f"€ {tot_costi:,.2f}")
         r3.metric("Avanzo / Disavanzo", f"€ {tot_ricavi - tot_costi:,.2f}")
         st.dataframe(df_rend, width="stretch")
+
+    with tab_apertura:
+        st.markdown("### 📂 Esercizio sociale e apertura dei conti")
+        mese_ini = mese_inizio_esercizio()
+        c_es1, c_es2 = st.columns([2, 1])
+        nuovo_mese = c_es1.selectbox(
+            "L'esercizio sociale inizia a", esercizio.MESI, index=mese_ini - 1,
+            help="Gennaio = anno solare (1/1-31/12). Luglio = stagione sportiva (1/7-30/6).")
+        if esercizio.MESI.index(nuovo_mese) + 1 != mese_ini and leggi_df("SELECT COUNT(*) AS n FROM aperture_esercizio")["n"].iloc[0]:
+            st.warning("Ci sono aperture già registrate: se cambi l'inizio dell'esercizio vanno eliminate e rifatte per i nuovi periodi.")
+        if esercizio.MESI.index(nuovo_mese) + 1 != mese_ini and c_es2.button("💾 Salva inizio esercizio"):
+            with db_write() as w_conn:
+                w_conn.execute(
+                    "INSERT INTO impostazioni (chiave, valore) VALUES ('mese_inizio_esercizio', ?) "
+                    "ON CONFLICT(chiave) DO UPDATE SET valore = excluded.valore",
+                    [str(esercizio.MESI.index(nuovo_mese) + 1)])
+            st.session_state["flash"] = f"Esercizio sociale impostato con inizio a {nuovo_mese}."
+            st.rerun()
+
+        # Esercizi selezionabili: il precedente, quello in corso, il successivo e quelli già aperti
+        oggi = datetime.date.today()
+        periodi = {}
+        for d in (oggi - datetime.timedelta(days=365), oggi, oggi + datetime.timedelta(days=365)):
+            ini, fin, etich = esercizio.periodo_esercizio(d, mese_ini)
+            periodi[etich] = (ini, fin)
+        df_aperture = leggi_df("SELECT esercizio, data_apertura, movimento_id, creata_il FROM aperture_esercizio")
+        for r in df_aperture.itertuples():
+            ini, fin, etich = esercizio.periodo_esercizio(datetime.date.fromisoformat(r.data_apertura), mese_ini)
+            periodi.setdefault(etich, (ini, fin))
+        etich_corrente = esercizio.periodo_esercizio(oggi, mese_ini)[2]
+        elenco_es = sorted(periodi, reverse=True)
+        es_sel = st.selectbox("Esercizio da aprire", elenco_es, index=elenco_es.index(etich_corrente))
+        ini_es, fin_es = periodi[es_sel]
+        ini_prec, fin_prec, etich_prec = esercizio.esercizio_precedente(ini_es, mese_ini)
+        st.caption(f"Esercizio {es_sel}: dal {ini_es.strftime('%d/%m/%Y')} al {fin_es.strftime('%d/%m/%Y')}. "
+                   f"La scrittura di apertura viene registrata in prima nota il {ini_es.strftime('%d/%m/%Y')}.")
+
+        apertura_es = df_aperture[df_aperture["esercizio"] == es_sel]
+        if not apertura_es.empty:
+            st.success(f"L'esercizio {es_sel} è già stato aperto ({apertura_es['creata_il'].iloc[0]}). Puoi correggere i valori e salvare di nuovo.")
+
+        persone = leggi_df("SELECT id, denominazione FROM anagrafiche WHERE tipo IN ('SOCIO_CALCIATORE', 'ALTRO') ORDER BY denominazione")
+        sponsor = leggi_df("SELECT id, denominazione FROM anagrafiche WHERE tipo = 'SPONSOR' ORDER BY denominazione")
+        nomi = {int(r.id): r.denominazione for r in pd.concat([persone, sponsor]).itertuples()}
+        ka = f"ap_{es_sel}_"
+
+        def imposta_valori(saldi, crediti):
+            """Mette nei campi i saldi per conto e i crediti per persona/sponsor."""
+            for codice, _, lato in esercizio.CONTI_APERTURA:
+                saldo = saldi.get(codice, 0.0)
+                st.session_state[ka + codice] = float(saldo if lato == "DARE" else -saldo)
+            for tipo in ("SOCIO", "SPONSOR"):
+                righe_tipo = [c for c in crediti if c["tipo"] == tipo and c["importo"] and int(c["anagrafica_id"]) in nomi]
+                st.session_state[ka + tipo] = [c["anagrafica_id"] for c in righe_tipo]
+                for c in righe_tipo:
+                    st.session_state[f"{ka}{tipo}_{c['anagrafica_id']}"] = float(c["importo"])
+                    st.session_state[f"{ka}{tipo}_d_{c['anagrafica_id']}"] = c.get("descrizione") or ""
+
+        # Primo caricamento: valori dell'apertura già salvata
+        if ka + "caricato" not in st.session_state:
+            if not apertura_es.empty:
+                righe_ap = leggi_df(
+                    "SELECT p.codice, r.dare - r.avere AS saldo FROM righe_prima_nota r JOIN piano_dei_conti p ON p.id = r.sottoconto_id WHERE r.movimento_id = ?",
+                    [int(apertura_es["movimento_id"].iloc[0])])
+                crediti_sal = leggi_df("SELECT anagrafica_id, tipo, importo, descrizione FROM crediti_apertura WHERE esercizio = ?", [es_sel])
+                imposta_valori({r.codice: float(r.saldo) for r in righe_ap.itertuples()},
+                               [{k: valore_pulito(v) for k, v in c.items()} for c in crediti_sal.to_dict("records")])
+            st.session_state[ka + "caricato"] = True
+
+        if st.button(f"📥 Proponi i saldi di chiusura dell'esercizio {etich_prec}",
+                     help="Riprende dalla prima nota i saldi di banca, PayPal, cassa e debiti a fine esercizio precedente, "
+                          "e i crediti ancora da incassare da soci e sponsor."):
+            crediti_prop = []
+            for tipo in ("SOCIO", "SPONSOR"):
+                df_res = crediti_residui(etich_prec, ini_prec, fin_prec, tipo)
+                crediti_prop += [{"anagrafica_id": int(r.anagrafica_id), "tipo": tipo, "importo": float(r.residuo),
+                                  "descrizione": f"Residuo esercizio {etich_prec}"} for r in df_res.itertuples() if r.residuo > 0]
+            imposta_valori(saldi_conti_prima_del(ini_es), crediti_prop)
+            st.info("Valori proposti dalla chiusura dell'esercizio precedente: controllali e salva.")
+
+        st.markdown("##### Saldi iniziali")
+        valori_saldi = {}
+        col_saldi = st.columns(3)
+        for i, (codice, etichetta, lato) in enumerate(esercizio.CONTI_APERTURA):
+            valori_saldi[codice] = col_saldi[i % 3].number_input(
+                f"{etichetta} (€)", step=10.0, format="%.2f", key=ka + codice,
+                help="Saldo a debito: scrivilo con il segno meno." if codice == "10.01.001" else None)
+        # Ogni campo è scritto dal suo lato naturale (attività e debiti in positivo): righe_apertura li mette in dare o in avere
+        saldi_scrittura = valori_saldi
+
+        crediti_inseriti = []
+        for tipo, titolo, elenco in (("SOCIO", "Quote ancora da incassare dai soci", persone),
+                                     ("SPONSOR", "Sponsorizzazioni non ancora saldate", sponsor)):
+            st.markdown(f"##### {titolo}")
+            if elenco.empty:
+                st.caption("Nessuna anagrafica di questo tipo.")
+                continue
+            scelti = st.multiselect("Chi deve ancora pagare", [int(x) for x in elenco["id"]], format_func=lambda x: nomi.get(x, str(x)),
+                                    key=ka + tipo, placeholder="Scegli dall'elenco")
+            for aid in scelti:
+                cc = st.columns([3, 1, 3])
+                cc[0].markdown(f"**{nomi.get(aid, aid)}**")
+                imp = cc[1].number_input("Importo €", min_value=0.0, step=10.0, format="%.2f", key=f"{ka}{tipo}_{aid}", label_visibility="collapsed")
+                descr = cc[2].text_input("Descrizione", key=f"{ka}{tipo}_d_{aid}", placeholder="es. quota stagione precedente / fattura n.",
+                                         label_visibility="collapsed")
+                if imp:
+                    crediti_inseriti.append({"anagrafica_id": aid, "tipo": tipo, "importo": round(imp, 2), "descrizione": descr.strip()})
+
+        tot_soci = round(sum(c["importo"] for c in crediti_inseriti if c["tipo"] == "SOCIO"), 2)
+        tot_sponsor = round(sum(c["importo"] for c in crediti_inseriti if c["tipo"] == "SPONSOR"), 2)
+        righe_ap, netto = esercizio.righe_apertura(saldi_scrittura, tot_soci, tot_sponsor)
+
+        st.markdown("##### Riepilogo")
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Crediti verso soci", f"€ {tot_soci:,.2f}")
+        m2.metric("Crediti verso sponsor", f"€ {tot_sponsor:,.2f}")
+        m3.metric("Patrimonio netto di apertura", f"€ {netto:,.2f}")
+        if righe_ap:
+            st.dataframe(pd.DataFrame(righe_ap, columns=["Conto", "Descrizione", "Dare (€)", "Avere (€)"]), width="stretch", hide_index=True)
+
+        if st.button(f"💾 Salva apertura esercizio {es_sel}", type="primary", disabled=not righe_ap, key=ka + "salva"):
+            try:
+                with db_write() as w_conn:
+                    if not apertura_es.empty:
+                        vecchio = apertura_es["movimento_id"].iloc[0]
+                        if pd.notna(vecchio):
+                            w_conn.execute("DELETE FROM righe_prima_nota WHERE movimento_id = ?", [int(vecchio)])
+                            w_conn.execute("DELETE FROM movimenti_prima_nota WHERE id = ?", [int(vecchio)])
+                        w_conn.execute("DELETE FROM crediti_apertura WHERE esercizio = ?", [es_sel])
+                        w_conn.execute("DELETE FROM aperture_esercizio WHERE esercizio = ?", [es_sel])
+                    righe_journal = [(get_conto_id(w_conn, cod), descr, dare, avere) for cod, descr, dare, avere in righe_ap]
+                    mov_id = post_journal(w_conn, ini_es, f"APERTURA {es_sel}", f"Apertura esercizio {es_sel}", "ISTITUZIONALE", righe_journal)
+                    w_conn.execute(
+                        "INSERT INTO aperture_esercizio (esercizio, data_apertura, movimento_id, creata_il) VALUES (?, ?, ?, ?)",
+                        [es_sel, str(ini_es), mov_id, datetime.datetime.now().strftime("%d/%m/%Y %H:%M")])
+                    for c in crediti_inseriti:
+                        w_conn.execute(
+                            "INSERT INTO crediti_apertura (esercizio, anagrafica_id, tipo, importo, descrizione) VALUES (?, ?, ?, ?, ?)",
+                            [es_sel, int(c["anagrafica_id"]), c["tipo"], float(c["importo"]), c["descrizione"] or None])
+                st.session_state["flash"] = f"Apertura dell'esercizio {es_sel} registrata in prima nota."
+                st.rerun()
+            except Exception as ex_ap:
+                st.error(f"Errore nel salvataggio dell'apertura: nessuna modifica è stata salvata. Dettaglio: {ex_ap}")
+
+        if not apertura_es.empty:
+            with st.expander("🗑️ Elimina apertura"):
+                conferma_ap = st.checkbox("Confermo l'eliminazione della scrittura di apertura", key=ka + "conf_del")
+                if st.button("Elimina apertura", disabled=not conferma_ap, key=ka + "del"):
+                    with db_write() as w_conn:
+                        vecchio = apertura_es["movimento_id"].iloc[0]
+                        if pd.notna(vecchio):
+                            w_conn.execute("DELETE FROM righe_prima_nota WHERE movimento_id = ?", [int(vecchio)])
+                            w_conn.execute("DELETE FROM movimenti_prima_nota WHERE id = ?", [int(vecchio)])
+                        w_conn.execute("DELETE FROM crediti_apertura WHERE esercizio = ?", [es_sel])
+                        w_conn.execute("DELETE FROM aperture_esercizio WHERE esercizio = ?", [es_sel])
+                    for chiave in [c for c in st.session_state if str(c).startswith(ka)]:
+                        del st.session_state[chiave]
+                    st.session_state["flash"] = f"Apertura dell'esercizio {es_sel} eliminata."
+                    st.rerun()
 
 # ---------------------------------------------------------
 # 8. PIANO DEI CONTI ASD
