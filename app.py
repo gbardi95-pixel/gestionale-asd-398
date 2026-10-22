@@ -504,6 +504,10 @@ elif menu == "Soci, Atleti & Dirigenza":
                        a.codice_fiscale as 'Codice Fiscale',
                        t.numero_tessera as 'Matricola/Tessera N°', 
                        t.numero_scheda_attivita as 'N° Scheda Attività', 
+                       t.tipo_tessera as 'Tipo Tessera',
+                       t.numero_maglia as 'Maglia',
+                       a.tipo_documento as 'Documento',
+                       a.numero_documento as 'N° Documento',
                        t.quota_stagionale as 'Quota Dovuta (€)',
                        CASE WHEN t.gioca = 1 THEN 'Sì' ELSE 'No' END as Gioca,
                        CASE WHEN t.gioca = 1 THEN COALESCE(c.data_scadenza, 'MANCANTE') ELSE 'Non richiesto' END as 'Scadenza Medico',
@@ -573,6 +577,12 @@ elif menu == "Soci, Atleti & Dirigenza":
                 ruolo = c5.selectbox("Ruolo", RUOLI_LISTA)
                 quota = c6.number_input("Quota dovuta Anno Sportivo (€)", min_value=0.0, step=10.0)
 
+                c7, c8, c9, c10 = st.columns(4)
+                tipo_tess = c7.text_input("Tipo tessera (es. A, D, D/A)")
+                maglia = c8.number_input("N° maglia abituale (0 = nessuno)", 0, 99, 0)
+                tipo_doc = c9.text_input("Documento d'identità (es. CIE, C.I., PT)")
+                num_doc = c10.text_input("N° documento d'identità")
+
                 gioca = st.checkbox("⚽ Gioca / svolge attività sportiva (certificato medico obbligatorio)", value=True)
 
                 st.markdown("---")
@@ -589,15 +599,16 @@ elif menu == "Soci, Atleti & Dirigenza":
                         try:
                             with db_write() as w_conn:
                                 res1 = w_conn.execute(
-                                    "INSERT INTO anagrafiche (tipo, denominazione, codice_fiscale) VALUES ('SOCIO_CALCIATORE', ?, ?)",
-                                    [str(nome).strip(), str(cf).strip()]
+                                    "INSERT INTO anagrafiche (tipo, denominazione, codice_fiscale, tipo_documento, numero_documento) VALUES ('SOCIO_CALCIATORE', ?, ?, ?, ?)",
+                                    [str(nome).strip(), str(cf).strip(), str(tipo_doc).strip() or None, str(num_doc).strip() or None]
                                 )
                                 anag_id = res1.lastrowid
 
                                 w_conn.execute(
-                                    "INSERT INTO tesserati_calcio (anagrafica_id, numero_tessera, categoria, ruolo, data_tesseramento, quota_stagionale, gioca) "
-                                    "VALUES (?, ?, ?, ?, strftime('%Y-%m-%d', 'now'), ?, ?)",
-                                    [int(anag_id), str(matricola).strip(), str(categoria), str(ruolo), float(quota), int(gioca)]
+                                    "INSERT INTO tesserati_calcio (anagrafica_id, numero_tessera, tipo_tessera, numero_maglia, categoria, ruolo, data_tesseramento, quota_stagionale, gioca) "
+                                    "VALUES (?, ?, ?, ?, ?, ?, strftime('%Y-%m-%d', 'now'), ?, ?)",
+                                    [int(anag_id), str(matricola).strip(), str(tipo_tess).strip() or None, int(maglia) or None, str(categoria), str(ruolo),
+                                     float(quota), int(gioca)]
                                 )
 
                                 if data_scad:
