@@ -1,3 +1,4 @@
+import base64
 import datetime
 import hmac
 import io
@@ -6,7 +7,7 @@ import sqlite3
 import pandas as pd
 import streamlit as st
 from contextlib import contextmanager
-from modules import tesseramento
+from modules import distinte, tesseramento
 from modules.db import PIANO_DEI_CONTI_ASD, get_connection, init_db, usa_turso
 
 # ---------------------------------------------------------
@@ -14,7 +15,7 @@ from modules.db import PIANO_DEI_CONTI_ASD, get_connection, init_db, usa_turso
 # ---------------------------------------------------------
 # Incrementare a ogni modifica dello schema del DB: forza init_db() (e le migrazioni)
 # anche quando Streamlit Cloud aggiorna il codice senza riavviare il server.
-VERSIONE_SCHEMA_DB = 4
+VERSIONE_SCHEMA_DB = 5
 
 @st.cache_resource
 def _setup_database(versione_schema):
@@ -34,6 +35,12 @@ try:
     ENTE_TESSERAMENTO = st.secrets.get("ENTE_TESSERAMENTO", "Ente di Tesseramento")
 except Exception:
     ENTE_TESSERAMENTO = "Ente di Tesseramento"
+
+# Nome della società stampato nelle distinte di gara (Secrets: NOME_SOCIETA)
+try:
+    NOME_SOCIETA = st.secrets.get("NOME_SOCIETA", "")
+except Exception:
+    NOME_SOCIETA = ""
 
 st.set_page_config(page_title=APP_TITLE, layout="wide", page_icon="⚽")
 
@@ -89,6 +96,7 @@ menu = st.sidebar.radio(
     [
         "Dashboard & Alert Scadenze",
         "Soci, Atleti & Dirigenza",
+        "Distinte di Gara",
         "Ricevute Istituzionali (Art. 4)",
         "Sponsor & Pubblicità (398/91)",
         "Lavoro Sportivo & Rimborsi (D.Lgs. 36)",
@@ -170,6 +178,38 @@ def controlla_numero_documento(conn, tabella, col_numero, numero, anno):
     if gia_usato:
         return f"Il numero '{numero}' è già stato usato: scegline un altro."
     return None
+
+def valore_pulito(v):
+    """Valore letto da pandas senza NaN e con i numeri interi senza decimali (7.0 -> 7)."""
+    if v is None or (not isinstance(v, str) and pd.isna(v)):
+        return None
+    if isinstance(v, float) and v.is_integer():
+        return int(v)
+    return v
+
+def modello_distinta_bytes():
+    """Modello Word della distinta: quello caricato dall'app se presente, altrimenti quello generico del progetto."""
+    conn = get_ro_conn()
+    try:
+        row = conn.execute("SELECT contenuto_base64 FROM modelli_documenti WHERE nome = 'distinta_gara'").fetchone()
+    finally:
+        conn.close()
+    if row and row[0]:
+        return base64.b64decode(row[0])
+    with open(distinte.MODELLO_GENERICO, "rb") as f:
+        return f.read()
+
+def docx_distinta(distinta_id):
+    """File Word compilato di una distinta salvata."""
+    conn = get_ro_conn()
+    try:
+        df_t = pd.read_sql_query("SELECT * FROM distinte_gara WHERE id = ?", conn, params=[int(distinta_id)])
+        df_r = pd.read_sql_query("SELECT * FROM distinte_gara_righe WHERE distinta_id = ? ORDER BY ordine", conn, params=[int(distinta_id)])
+    finally:
+        conn.close()
+    testata = {k: valore_pulito(v) for k, v in df_t.iloc[0].items()}
+    righe = [{k: valore_pulito(v) for k, v in r.items()} for r in df_r.to_dict("records")]
+    return distinte.genera_docx(modello_distinta_bytes(), distinte.contesto_distinta(testata, righe, NOME_SOCIETA))
 
 def post_journal(conn, data_reg, num_doc, causale, tipo_att, righe):
     """
@@ -903,6 +943,313 @@ elif menu == "Soci, Atleti & Dirigenza":
 # ---------------------------------------------------------
 # 3. RICEVUTE ISTITUZIONALI (ART. 4 DPR 633/72)
 # ---------------------------------------------------------
+elif menu == "Distinte di Gara":
+    st.subheader("📋 Distinte di Gara")
+
+    RUOLI_DISTINTA = ["Allenatore", "Allenatore in seconda", "Dirigente accompagnatore", "Presidente", "Vice presidente",
+                      "Dirigente", "Massaggiatore", "Medico", "Preparatore atletico"]
+
+    conn = get_ro_conn()
+    try:
+        df_archivio = pd.read_sql_query(
+            """
+            SELECT d.id, d.data_gara, d.ora, d.squadra_casa, d.squadra_ospite, d.campo, d.competizione,
+                   (SELECT COUNT(*) FROM distinte_gara_righe r WHERE r.distinta_id = d.id AND r.sezione = 'GIOCATORE') AS giocatori
+            FROM distinte_gara d
+            ORDER BY d.data_gara DESC, d.id DESC
+            """,
+            conn,
+        )
+        df_modello = pd.read_sql_query("SELECT nome_file, caricato_il FROM modelli_documenti WHERE nome = 'distinta_gara'", conn)
+    finally:
+        conn.close()
+
+    tab_compila, tab_archivio, tab_modello = st.tabs(["📝 Compila distinta", "📚 Archivio", "⚙️ Modello Word"])
+
+    with tab_compila:
+        etichette = {0: "➕ Nuova distinta"}
+        for r in df_archivio.itertuples():
+            etichette[int(r.id)] = f"{pd.Timestamp(r.data_gara).strftime('%d/%m/%Y')} - {r.squadra_casa or '?'} vs {r.squadra_ospite or '?'}"
+        if "dist_sel_prossima" in st.session_state:  # dopo il salvataggio di una nuova distinta si passa alla distinta salvata
+            st.session_state["dist_sel"] = st.session_state.pop("dist_sel_prossima")
+        if st.session_state.get("dist_sel") not in etichette:
+            st.session_state.pop("dist_sel", None)
+        did = st.selectbox("Distinta da compilare", list(etichette), format_func=etichette.get, key="dist_sel",
+                           help="Scegli una distinta dell'archivio per correggerla, oppure creane una nuova.")
+        k = f"dist{did}_"
+
+        # Dati salvati (modifica) oppure, per una nuova distinta, lo staff dell'ultima distinta come proposta
+        conn = get_ro_conn()
+        try:
+            id_base = did or (int(df_archivio["id"].iloc[0]) if not df_archivio.empty else 0)
+            df_t_sal = pd.read_sql_query("SELECT * FROM distinte_gara WHERE id = ?", conn, params=[did])
+            df_r_sal = pd.read_sql_query("SELECT * FROM distinte_gara_righe WHERE distinta_id = ? ORDER BY ordine", conn, params=[id_base])
+            df_pers = pd.read_sql_query(
+                """
+                SELECT a.id, a.denominazione, a.codice_fiscale, a.tipo_documento, a.numero_documento,
+                       t.numero_tessera, t.numero_scheda_attivita, t.tipo_tessera, t.gioca,
+                       c.data_scadenza, c.stato_idoneita
+                FROM tesserati_calcio t
+                JOIN anagrafiche a ON a.id = t.anagrafica_id
+                LEFT JOIN (
+                    SELECT anagrafica_id, MAX(data_scadenza) AS data_scadenza, stato_idoneita
+                    FROM certificati_medici
+                    GROUP BY anagrafica_id
+                ) c ON c.anagrafica_id = a.id
+                WHERE t.stato = 'ATTIVO'
+                ORDER BY a.denominazione
+                """,
+                conn,
+            ).drop_duplicates("id")
+        finally:
+            conn.close()
+
+        testata_sal = {c: valore_pulito(v) for c, v in df_t_sal.iloc[0].items()} if not df_t_sal.empty else {}
+        righe_sal = [{c: valore_pulito(v) for c, v in r.items()} for r in df_r_sal.to_dict("records")]
+        if not did:
+            righe_sal = [r for r in righe_sal if r["sezione"] == "DIRIGENTE"]
+        sal_gioc = {r["anagrafica_id"]: r for r in righe_sal if r["sezione"] == "GIOCATORE" and r.get("anagrafica_id")}
+        sal_dir = {r["anagrafica_id"]: r for r in righe_sal if r["sezione"] == "DIRIGENTE" and r.get("anagrafica_id")}
+
+        pers = {int(r["id"]): {c: valore_pulito(v) for c, v in r.items()} for r in df_pers.to_dict("records")}
+
+        st.markdown("##### Partita")
+        c1, c2, c3 = st.columns(3)
+        data_def = datetime.date.fromisoformat(testata_sal["data_gara"]) if testata_sal.get("data_gara") else datetime.date.today()
+        data_gara = c1.date_input("Data gara", value=data_def, format="DD/MM/YYYY", key=k + "data")
+        ora = c2.text_input("Ora", value=testata_sal.get("ora") or "", placeholder="es. 14:30", key=k + "ora")
+        campo = c3.text_input("Campo", value=testata_sal.get("campo") or "", key=k + "campo")
+        c4, c5, c6, c7 = st.columns(4)
+        squadra_casa = c4.text_input("Squadra di casa (1ª nominata)", value=testata_sal.get("squadra_casa") or NOME_SOCIETA, key=k + "casa")
+        squadra_ospite = c5.text_input("Squadra ospite (2ª nominata)", value=testata_sal.get("squadra_ospite") or "", key=k + "ospite")
+        competizione = c6.text_input("Competizione", value=testata_sal.get("competizione") or "", key=k + "comp")
+        colori_maglie = c7.text_input("Colori maglie", value=testata_sal.get("colori_maglie") or "", key=k + "colori",
+                                      help="Se il modello Word ha le caselle da spuntare, scrivi esattamente il testo della casella.")
+        data_iso_gara = data_gara.strftime("%Y-%m-%d")
+
+        def motivo_esclusione(p):
+            """Perché la persona non può essere messa in distinta come giocatore alla data della gara ('' se può)."""
+            if not p.get("gioca"):
+                return "non risulta tra chi gioca (sezione Soci)"
+            if not (p.get("numero_scheda_attivita") or p.get("numero_tessera")):
+                return "manca il numero di tessera"
+            if not p.get("data_scadenza"):
+                return "certificato medico mancante"
+            if str(p["data_scadenza"]) < data_iso_gara:
+                return f"certificato medico scaduto il {pd.Timestamp(p['data_scadenza']).strftime('%d/%m/%Y')}"
+            if p.get("stato_idoneita") in ("NON_IDONEO", "IN_ATTESA"):
+                return f"certificato medico: {str(p['stato_idoneita']).replace('_', ' ').lower()}"
+            return ""
+
+        esclusi = {pid: motivo_esclusione(p) for pid, p in pers.items()}
+        ammessi = [pid for pid, m in esclusi.items() if not m]
+
+        st.markdown("##### Giocatori")
+        def_gioc = [pid for pid in sal_gioc if pid in ammessi]
+        non_piu_ammessi = [pid for pid in sal_gioc if pid not in ammessi]
+        if non_piu_ammessi:
+            st.warning("Tolti dalla distinta perché alla data della gara non possono giocare: " + ", ".join(
+                f"{pers[pid]['denominazione']} ({esclusi[pid]})" if pid in pers else str(sal_gioc[pid]["nominativo"]) for pid in non_piu_ammessi))
+        sel_gioc = st.multiselect("Giocatori convocati (nell'ordine della distinta)", ammessi, default=def_gioc,
+                                  format_func=lambda pid: pers[pid]["denominazione"], key=k + "gioc",
+                                  placeholder="Scegli i giocatori")
+        with st.expander(f"🚫 Non selezionabili alla data della gara ({sum(1 for pid, m in esclusi.items() if m and pers[pid].get('gioca'))})"):
+            st.caption("Solo chi gioca, ha il numero di tessera e un certificato medico valido il giorno della gara può essere messo in distinta.")
+            for pid, m in esclusi.items():
+                if m and pers[pid].get("gioca"):
+                    st.write(f"- {pers[pid]['denominazione']}: {m}")
+
+        righe_gioc = []
+        if sel_gioc:
+            h = st.columns([3, 1, 1, 1, 1.2, 2])
+            for col, txt in zip(h, ["Giocatore / n° usato", "Maglia", "Cap.", "Tipo tessera", "Documento", "N° documento"]):
+                col.caption(txt)
+            for i, pid in enumerate(sel_gioc):
+                p, sal = pers[pid], sal_gioc.get(pid, {})
+                numero = p.get("numero_scheda_attivita") or p.get("numero_tessera")
+                tipo_def = sal.get("tipo_tessera") or ("A" if p.get("numero_scheda_attivita") else (p.get("tipo_tessera") or "A"))
+                cols = st.columns([3, 1, 1, 1, 1.2, 2])
+                cols[0].markdown(f"**{p['denominazione']}**  \n{'scheda attività' if p.get('numero_scheda_attivita') else 'tessera'} {numero}")
+                maglia = cols[1].number_input("Maglia", 0, 99, int(sal.get("numero_maglia") or i + 1), key=f"{k}m{pid}", label_visibility="collapsed")
+                opz_cap = ["—", "C", "VC"]
+                cap = cols[2].selectbox("Cap.", opz_cap, index=opz_cap.index(sal.get("capitano") or "—"), key=f"{k}c{pid}", label_visibility="collapsed")
+                cap = "" if cap == "—" else cap
+                tipo = cols[3].text_input("Tipo", value=tipo_def, key=f"{k}t{pid}", label_visibility="collapsed")
+                tdoc = cols[4].text_input("Doc", value=sal.get("tipo_documento") or p.get("tipo_documento") or "", placeholder="es. CIE", key=f"{k}td{pid}", label_visibility="collapsed")
+                ndoc = cols[5].text_input("N° doc", value=sal.get("numero_documento") or p.get("numero_documento") or "", key=f"{k}nd{pid}", label_visibility="collapsed")
+                nascita = distinte.data_nascita_da_cf(p.get("codice_fiscale"))
+                righe_gioc.append(dict(sezione="GIOCATORE", anagrafica_id=pid, nominativo=p["denominazione"], numero_maglia=int(maglia) or None,
+                                       capitano=cap, ruolo=None, data_nascita=nascita.isoformat() if nascita else None,
+                                       tipo_tessera=tipo.strip(), numero_tessera=str(numero), tipo_documento=tdoc.strip(), numero_documento=ndoc.strip()))
+
+        st.markdown("##### Persone autorizzate ad accedere al terreno di gioco")
+        def_dir = [pid for pid in sal_dir if pid in pers]
+        sel_dir = st.multiselect("Allenatori e dirigenti", list(pers), default=def_dir,
+                                 format_func=lambda pid: pers[pid]["denominazione"], key=k + "dir", placeholder="Scegli allenatori e dirigenti",
+                                 help="Per una nuova distinta viene proposto lo staff dell'ultima distinta salvata.")
+        righe_dir = []
+        if sel_dir:
+            h = st.columns([3, 2, 1, 1.2, 2])
+            for col, txt in zip(h, ["Persona / n° tessera", "Ruolo", "Tipo tessera", "Documento", "N° documento"]):
+                col.caption(txt)
+            for pid in sel_dir:
+                p, sal = pers[pid], sal_dir.get(pid, {})
+                numero = p.get("numero_tessera") or p.get("numero_scheda_attivita") or ""
+                tipo_def = sal.get("tipo_tessera") or p.get("tipo_tessera") or ("D/A" if p.get("gioca") else "D")
+                cols = st.columns([3, 2, 1, 1.2, 2])
+                cols[0].markdown(f"**{p['denominazione']}**  \ntessera {numero or '⚠️ mancante'}")
+                ruolo_sal = sal.get("ruolo") or "Dirigente accompagnatore"
+                opz_ruoli = RUOLI_DISTINTA if ruolo_sal in RUOLI_DISTINTA else [ruolo_sal] + RUOLI_DISTINTA
+                ruolo = cols[1].selectbox("Ruolo", opz_ruoli, index=opz_ruoli.index(ruolo_sal), key=f"{k}r{pid}", label_visibility="collapsed")
+                tipo = cols[2].text_input("Tipo", value=tipo_def, key=f"{k}dt{pid}", label_visibility="collapsed")
+                tdoc = cols[3].text_input("Doc", value=sal.get("tipo_documento") or p.get("tipo_documento") or "", placeholder="es. CIE", key=f"{k}dtd{pid}", label_visibility="collapsed")
+                ndoc = cols[4].text_input("N° doc", value=sal.get("numero_documento") or p.get("numero_documento") or "", key=f"{k}dnd{pid}", label_visibility="collapsed")
+                righe_dir.append(dict(sezione="DIRIGENTE", anagrafica_id=pid, nominativo=p["denominazione"], numero_maglia=None, capitano=None,
+                                      ruolo=ruolo, data_nascita=None, tipo_tessera=tipo.strip(), numero_tessera=str(numero),
+                                      tipo_documento=tdoc.strip(), numero_documento=ndoc.strip()))
+
+        # Chi è sia giocatore sia dirigente: con la scheda attività compare con due numeri diversi
+        for pid in set(sel_gioc) & set(sel_dir):
+            p = pers[pid]
+            if p.get("numero_scheda_attivita"):
+                st.info(f"{p['denominazione']}: tra i giocatori con la scheda attività {p['numero_scheda_attivita']}, tra i dirigenti con la tessera {p.get('numero_tessera')}.")
+            else:
+                st.warning(f"{p['denominazione']} è sia tra i giocatori sia tra i dirigenti con lo stesso numero di tessera: verifica che il regolamento lo consenta.")
+
+        errori = []
+        maglie = [r["numero_maglia"] for r in righe_gioc if r["numero_maglia"]]
+        doppie = sorted({m for m in maglie if maglie.count(m) > 1})
+        if doppie:
+            errori.append("Numeri di maglia ripetuti: " + ", ".join(map(str, doppie)) + ".")
+        for sigla in ("C", "VC"):
+            if sum(1 for r in righe_gioc if r["capitano"] == sigla) > 1:
+                errori.append(f"C'è più di un {'capitano' if sigla == 'C' else 'vice capitano'}.")
+        for e in errori:
+            st.error(e)
+
+        etichetta_salva = "💾 Salva modifiche alla distinta" if did else "💾 Salva distinta"
+        if not sel_gioc:
+            st.caption("Seleziona almeno un giocatore per poter salvare la distinta.")
+        if st.button(etichetta_salva, type="primary", disabled=bool(errori) or not sel_gioc, key=k + "salva"):
+            adesso = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+            valori = [data_iso_gara, ora.strip(), campo.strip(), squadra_casa.strip(), squadra_ospite.strip(), competizione.strip(), colori_maglie.strip()]
+            try:
+                with db_write() as w_conn:
+                    if did:
+                        w_conn.execute(
+                            "UPDATE distinte_gara SET data_gara = ?, ora = ?, campo = ?, squadra_casa = ?, squadra_ospite = ?, competizione = ?, "
+                            "colori_maglie = ?, modificata_il = ? WHERE id = ?",
+                            valori + [adesso, int(did)],
+                        )
+                        w_conn.execute("DELETE FROM distinte_gara_righe WHERE distinta_id = ?", [int(did)])
+                        id_salvata = int(did)
+                    else:
+                        id_salvata = int(w_conn.execute(
+                            "INSERT INTO distinte_gara (data_gara, ora, campo, squadra_casa, squadra_ospite, competizione, colori_maglie, creata_il) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                            valori + [adesso],
+                        ).lastrowid)
+                    for ordine, r in enumerate(righe_gioc + righe_dir):
+                        w_conn.execute(
+                            "INSERT INTO distinte_gara_righe (distinta_id, sezione, ordine, anagrafica_id, nominativo, numero_maglia, capitano, ruolo, "
+                            "data_nascita, tipo_tessera, numero_tessera, tipo_documento, numero_documento) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            [id_salvata, r["sezione"], ordine, int(r["anagrafica_id"]), r["nominativo"], r["numero_maglia"], r["capitano"] or None,
+                             r["ruolo"], r["data_nascita"], r["tipo_tessera"] or None, r["numero_tessera"] or None,
+                             r["tipo_documento"] or None, r["numero_documento"] or None],
+                        )
+                    # Documento e tipo di tessera tornano in anagrafica, così la prossima distinta li propone già compilati
+                    for r in righe_gioc + righe_dir:
+                        if r["tipo_documento"] or r["numero_documento"]:
+                            w_conn.execute("UPDATE anagrafiche SET tipo_documento = ?, numero_documento = ? WHERE id = ?",
+                                           [r["tipo_documento"] or None, r["numero_documento"] or None, int(r["anagrafica_id"])])
+                        if r["tipo_tessera"] and r["numero_tessera"] == str(pers[r["anagrafica_id"]].get("numero_tessera") or ""):
+                            w_conn.execute("UPDATE tesserati_calcio SET tipo_tessera = ? WHERE anagrafica_id = ?",
+                                           [r["tipo_tessera"], int(r["anagrafica_id"])])
+                if not did:
+                    st.session_state["dist_sel_prossima"] = id_salvata
+                    for chiave in [c for c in st.session_state if str(c).startswith("dist0_")]:
+                        del st.session_state[chiave]  # la prossima "Nuova distinta" riparte vuota
+                st.session_state["flash"] = "Distinta salvata: scaricala qui sotto o dall'Archivio."
+                st.rerun()
+            except Exception as ex_dist:
+                st.error(f"Errore nel salvataggio della distinta: {ex_dist}")
+
+        if did:
+            try:
+                st.download_button("📥 Scarica distinta salvata (Word)", docx_distinta(did), file_name=f"distinta_{did}.docx",
+                                   mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document", key=f"scarica_{did}")
+                st.caption("Il file contiene la versione salvata: se hai cambiato qualcosa sopra, salva prima di scaricare.")
+            except Exception as ex_docx:
+                st.error(f"Errore nella compilazione del modello Word: {ex_docx}")
+
+    with tab_archivio:
+        if df_archivio.empty:
+            st.info("Nessuna distinta salvata.")
+        else:
+            vista = df_archivio.rename(columns={"data_gara": "Data", "ora": "Ora", "squadra_casa": "Casa", "squadra_ospite": "Ospite",
+                                                "campo": "Campo", "competizione": "Competizione", "giocatori": "Giocatori"}).drop(columns=["id"])
+            vista["Data"] = pd.to_datetime(vista["Data"]).dt.strftime("%d/%m/%Y")
+            st.dataframe(vista, width="stretch", hide_index=True)
+            id_arch = st.selectbox("Distinta", [i for i in etichette if i], format_func=etichette.get, key="arch_sel")
+            ca, cb = st.columns(2)
+            try:
+                ca.download_button("📥 Scarica (Word)", docx_distinta(id_arch), file_name=f"distinta_{id_arch}.docx",
+                                   mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document", key=f"arch_dl_{id_arch}")
+            except Exception as ex_docx:
+                ca.error(f"Errore nella compilazione del modello Word: {ex_docx}")
+            conferma = cb.checkbox("Confermo l'eliminazione", key=f"arch_conf_{id_arch}")
+            if cb.button("🗑️ Elimina distinta", disabled=not conferma, key=f"arch_del_{id_arch}"):
+                try:
+                    with db_write() as w_conn:
+                        w_conn.execute("DELETE FROM distinte_gara_righe WHERE distinta_id = ?", [int(id_arch)])
+                        w_conn.execute("DELETE FROM distinte_gara WHERE id = ?", [int(id_arch)])
+                    st.session_state["flash"] = "Distinta eliminata."
+                    st.rerun()
+                except Exception as ex_del:
+                    st.error(f"Errore nell'eliminazione: {ex_del}")
+
+    with tab_modello:
+        if df_modello.empty:
+            st.info("In uso: modello generico del gestionale. Puoi caricare il modello Word del tuo ente con i segnaposto.")
+        else:
+            st.success(f"In uso: modello caricato «{df_modello['nome_file'].iloc[0]}» ({df_modello['caricato_il'].iloc[0]}).")
+        with open(distinte.MODELLO_GENERICO, "rb") as f:
+            st.download_button("📄 Scarica il modello generico (da usare come esempio)", f.read(), file_name="modello_distinta_generico.docx",
+                               mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+        with st.expander("Segnaposto utilizzabili nel modello Word"):
+            st.markdown(
+                "- Partita: `{{ societa }}`, `{{ squadra_casa }}`, `{{ squadra_ospite }}`, `{{ data }}`, `{{ ora }}`, `{{ campo }}`, "
+                "`{{ competizione }}`, `{{ colori_maglie }}`; `{{ spunta('Bianca') }}` stampa ☒ se i colori maglie sono «Bianca», altrimenti □.\n"
+                "- Tabella giocatori: una riga con `{%tr for g in giocatori|righe(20) %}`, la riga con i campi e una riga con `{%tr endfor %}` "
+                "(20 = righe stampate anche se vuote). Campi: `{{ g.maglia }}`, `{{ g.nome }}`, `{{ g.cap }}`, `{{ g.nascita }}` "
+                "(oppure `{{ g.nascita_g }}`, `{{ g.nascita_m }}`, `{{ g.nascita_a }}`), `{{ g.tipo_tessera }}`, `{{ g.tessera }}`, "
+                "`{{ g.tipo_doc }}`, `{{ g.num_doc }}`.\n"
+                "- Tabella staff: come sopra con `{%tr for d in dirigenti|righe(5) %}` e i campi `{{ d.ruolo }}`, `{{ d.nome }}`, "
+                "`{{ d.tipo_tessera }}`, `{{ d.tessera }}`, `{{ d.tipo_doc }}`, `{{ d.num_doc }}`."
+            )
+        file_modello = st.file_uploader("Carica modello Word (.docx)", type=["docx"], key="modello_distinta_upl")
+        if file_modello is not None and st.button("💾 Usa questo modello", key="modello_distinta_salva"):
+            contenuto = file_modello.getvalue()
+            try:
+                distinte.genera_docx(contenuto, distinte.contesto_distinta({}, [], NOME_SOCIETA))  # prova di compilazione
+            except Exception as ex_mod:
+                st.error(f"Il modello non è valido: {ex_mod}")
+            else:
+                with db_write() as w_conn:
+                    w_conn.execute(
+                        "INSERT INTO modelli_documenti (nome, nome_file, contenuto_base64, caricato_il) VALUES ('distinta_gara', ?, ?, ?) "
+                        "ON CONFLICT(nome) DO UPDATE SET nome_file = excluded.nome_file, contenuto_base64 = excluded.contenuto_base64, "
+                        "caricato_il = excluded.caricato_il",
+                        [file_modello.name, base64.b64encode(contenuto).decode("ascii"), datetime.datetime.now().strftime("%d/%m/%Y %H:%M")],
+                    )
+                st.session_state["flash"] = "Modello della distinta aggiornato."
+                st.rerun()
+        if not df_modello.empty and st.button("↩️ Torna al modello generico", key="modello_distinta_reset"):
+            with db_write() as w_conn:
+                w_conn.execute("DELETE FROM modelli_documenti WHERE nome = 'distinta_gara'")
+            st.session_state["flash"] = "Ripristinato il modello generico."
+            st.rerun()
+
 elif menu == "Ricevute Istituzionali (Art. 4)":
     st.subheader("📜 Emissione Ricevute Istituzionali / Quote Associative")
 

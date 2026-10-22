@@ -17,3 +17,7 @@ import_libro_soci_http.py
 .venv/
 __pycache__/
 *.pyc
+
+# Documenti Word locali (modelli con dati della società); il modello generico in modelli/ resta nel repository
+*.docx
+!modelli/*.docx

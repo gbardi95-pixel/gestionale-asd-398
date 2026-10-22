@@ -338,6 +338,63 @@ def init_db():
     );
     """)
 
+    # 12. Distinte di gara: testata della partita e righe (giocatori e dirigenti), con i dati
+    # copiati al momento del salvataggio così la distinta archiviata non cambia se cambia l'anagrafica
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS distinte_gara (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        data_gara TEXT NOT NULL,
+        ora TEXT,
+        campo TEXT,
+        squadra_casa TEXT,
+        squadra_ospite TEXT,
+        competizione TEXT,
+        colori_maglie TEXT,
+        note TEXT,
+        creata_il TEXT,
+        modificata_il TEXT
+    );
+    """)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS distinte_gara_righe (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        distinta_id INTEGER NOT NULL REFERENCES distinte_gara(id) ON DELETE CASCADE,
+        sezione TEXT NOT NULL CHECK(sezione IN ('GIOCATORE', 'DIRIGENTE')),
+        ordine INTEGER NOT NULL DEFAULT 0,
+        anagrafica_id INTEGER REFERENCES anagrafiche(id) ON DELETE SET NULL,
+        nominativo TEXT NOT NULL,
+        numero_maglia INTEGER,
+        capitano TEXT,
+        ruolo TEXT,
+        data_nascita TEXT,
+        tipo_tessera TEXT,
+        numero_tessera TEXT,
+        tipo_documento TEXT,
+        numero_documento TEXT
+    );
+    """)
+
+    # 13. Modelli di documento personalizzati (es. modello Word della distinta), salvati in base64
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS modelli_documenti (
+        nome TEXT PRIMARY KEY,
+        nome_file TEXT,
+        contenuto_base64 TEXT NOT NULL,
+        caricato_il TEXT
+    );
+    """)
+
+    # Migrazioni per le distinte: documento d'identità in anagrafica e tipo di tessera (es. A, D, D/A)
+    for alter_sql in (
+        "ALTER TABLE anagrafiche ADD COLUMN tipo_documento TEXT;",
+        "ALTER TABLE anagrafiche ADD COLUMN numero_documento TEXT;",
+        "ALTER TABLE tesserati_calcio ADD COLUMN tipo_tessera TEXT;",
+    ):
+        try:
+            cursor.execute(alter_sql)
+        except Exception:
+            pass  # colonna già presente
+
     # Numeri di ricevute e fatture univoci (se nel DB esistono già doppioni l'indice non viene creato)
     for indice_sql in (
         "CREATE UNIQUE INDEX IF NOT EXISTS ux_ricevute_numero ON ricevute_istituzionali(numero_ricevuta);",
