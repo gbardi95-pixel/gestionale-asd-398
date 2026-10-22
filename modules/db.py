@@ -384,11 +384,12 @@ def init_db():
     );
     """)
 
-    # Migrazioni per le distinte: documento d'identità in anagrafica e tipo di tessera (es. A, D, D/A)
+    # Migrazioni per le distinte: documento d'identità in anagrafica, tipo di tessera (es. A, D, D/A) e maglia abituale
     for alter_sql in (
         "ALTER TABLE anagrafiche ADD COLUMN tipo_documento TEXT;",
         "ALTER TABLE anagrafiche ADD COLUMN numero_documento TEXT;",
         "ALTER TABLE tesserati_calcio ADD COLUMN tipo_tessera TEXT;",
+        "ALTER TABLE tesserati_calcio ADD COLUMN numero_maglia INTEGER;",
     ):
         try:
             cursor.execute(alter_sql)

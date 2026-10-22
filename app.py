@@ -15,7 +15,7 @@ from modules.db import PIANO_DEI_CONTI_ASD, get_connection, init_db, usa_turso
 # ---------------------------------------------------------
 # Incrementare a ogni modifica dello schema del DB: forza init_db() (e le migrazioni)
 # anche quando Streamlit Cloud aggiorna il codice senza riavviare il server.
-VERSIONE_SCHEMA_DB = 5
+VERSIONE_SCHEMA_DB = 6
 
 @st.cache_resource
 def _setup_database(versione_schema):
@@ -805,18 +805,24 @@ elif menu == "Soci, Atleti & Dirigenza":
 
             conn = get_ro_conn()
             try:
-                df_a = pd.read_sql_query("SELECT denominazione, codice_fiscale FROM anagrafiche WHERE id = ?", conn, params=[selected_anag_id])
-                df_t = pd.read_sql_query("SELECT numero_tessera, numero_scheda_attivita, categoria, ruolo, quota_stagionale, stato, gioca FROM tesserati_calcio WHERE anagrafica_id = ?", conn, params=[selected_anag_id])
+                df_a = pd.read_sql_query("SELECT denominazione, codice_fiscale, tipo_documento, numero_documento FROM anagrafiche WHERE id = ?", conn, params=[selected_anag_id])
+                df_t = pd.read_sql_query(
+                    "SELECT numero_tessera, numero_scheda_attivita, tipo_tessera, numero_maglia, categoria, ruolo, quota_stagionale, stato, gioca "
+                    "FROM tesserati_calcio WHERE anagrafica_id = ?", conn, params=[selected_anag_id])
                 df_c = pd.read_sql_query("SELECT data_rilascio, data_scadenza, medico_certificatore FROM certificati_medici WHERE anagrafica_id = ? ORDER BY data_scadenza DESC", conn, params=[selected_anag_id])
             finally:
                 conn.close()
 
             cur_nome = first_val(df_a, "denominazione")
             cur_cf = first_val(df_a, "codice_fiscale")
+            cur_tipo_doc = first_val(df_a, "tipo_documento")
+            cur_num_doc = first_val(df_a, "numero_documento")
 
             has_tess = not df_t.empty
             cur_matricola = first_val(df_t, "numero_tessera")
             cur_scheda = first_val(df_t, "numero_scheda_attivita")
+            cur_tipo_tess = first_val(df_t, "tipo_tessera")
+            cur_maglia = int(first_val(df_t, "numero_maglia", 0) or 0)
             cur_cat_raw = first_val(df_t, "categoria", "STAFF")
             cur_cat = cur_cat_raw if cur_cat_raw in CATEGORIE_LISTA else "STAFF"
             cur_role = first_val(df_t, "ruolo", "Dirigente")
@@ -846,10 +852,15 @@ elif menu == "Soci, Atleti & Dirigenza":
                 e_ruolo = e_col5.selectbox("Ruolo", ruoli_opzioni, index=ruoli_opzioni.index(cur_role))
                 e_quota = e_col6.number_input("Quota dovuta Anno Sportivo (€)", value=float(cur_quota), step=10.0)
 
-                e_col7 = st.columns(1)[0]
+                e_col7, e_col8, e_col9 = st.columns(3)
                 st_opts = ["ATTIVO", "INATTIVO", "IN_PRESTITO"]
                 st_idx = st_opts.index(cur_stato) if cur_stato in st_opts else 0
                 e_stato = e_col7.selectbox("Stato Scheda", st_opts, index=st_idx)
+                e_maglia = e_col8.number_input("N° maglia abituale (0 = nessuno)", 0, 99, cur_maglia)
+                e_tipo_tess = e_col9.text_input("Tipo tessera (es. A, D, D/A)", value=cur_tipo_tess)
+                d_col1, d_col2 = st.columns(2)
+                e_tipo_doc = d_col1.text_input("Documento d'identità (es. CIE, C.I., PT)", value=cur_tipo_doc)
+                e_num_doc = d_col2.text_input("N° documento d'identità", value=cur_num_doc)
                 e_gioca = st.checkbox("⚽ Gioca / svolge attività sportiva (certificato medico obbligatorio)", value=cur_gioca)
 
                 st.markdown("---")
@@ -878,20 +889,23 @@ elif menu == "Soci, Atleti & Dirigenza":
                     try:
                         with db_write() as w_conn:
                             w_conn.execute(
-                                "UPDATE anagrafiche SET denominazione = ?, codice_fiscale = ? WHERE id = ?",
-                                [str(e_nome).strip(), str(e_cf).strip(), int(selected_anag_id)]
+                                "UPDATE anagrafiche SET denominazione = ?, codice_fiscale = ?, tipo_documento = ?, numero_documento = ? WHERE id = ?",
+                                [str(e_nome).strip(), str(e_cf).strip(), str(e_tipo_doc).strip() or None, str(e_num_doc).strip() or None, int(selected_anag_id)]
                             )
 
                             if has_tess:
                                 w_conn.execute(
-                                    "UPDATE tesserati_calcio SET numero_tessera = ?, numero_scheda_attivita = ?, categoria = ?, ruolo = ?, quota_stagionale = ?, stato = ?, gioca = ? WHERE anagrafica_id = ?",
-                                    [str(e_matricola).strip(), str(e_scheda).strip(), str(e_categoria), str(e_ruolo), float(e_quota), str(e_stato), int(e_gioca), int(selected_anag_id)]
+                                    "UPDATE tesserati_calcio SET numero_tessera = ?, numero_scheda_attivita = ?, tipo_tessera = ?, numero_maglia = ?, categoria = ?, ruolo = ?, "
+                                    "quota_stagionale = ?, stato = ?, gioca = ? WHERE anagrafica_id = ?",
+                                    [str(e_matricola).strip(), str(e_scheda).strip(), str(e_tipo_tess).strip() or None, int(e_maglia) or None, str(e_categoria),
+                                     str(e_ruolo), float(e_quota), str(e_stato), int(e_gioca), int(selected_anag_id)]
                                 )
                             else:
                                 w_conn.execute(
-                                    "INSERT INTO tesserati_calcio (anagrafica_id, numero_tessera, numero_scheda_attivita, categoria, ruolo, data_tesseramento, quota_stagionale, stato, gioca) "
-                                    "VALUES (?, ?, ?, ?, ?, strftime('%Y-%m-%d', 'now'), ?, ?, ?)",
-                                    [int(selected_anag_id), str(e_matricola).strip(), str(e_scheda).strip(), str(e_categoria), str(e_ruolo), float(e_quota), str(e_stato), int(e_gioca)]
+                                    "INSERT INTO tesserati_calcio (anagrafica_id, numero_tessera, numero_scheda_attivita, tipo_tessera, numero_maglia, categoria, ruolo, "
+                                    "data_tesseramento, quota_stagionale, stato, gioca) VALUES (?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%d', 'now'), ?, ?, ?)",
+                                    [int(selected_anag_id), str(e_matricola).strip(), str(e_scheda).strip(), str(e_tipo_tess).strip() or None, int(e_maglia) or None,
+                                     str(e_categoria), str(e_ruolo), float(e_quota), str(e_stato), int(e_gioca)]
                                 )
 
                             if e_data_scad:
@@ -987,7 +1001,7 @@ elif menu == "Distinte di Gara":
             df_pers = pd.read_sql_query(
                 """
                 SELECT a.id, a.denominazione, a.codice_fiscale, a.tipo_documento, a.numero_documento,
-                       t.numero_tessera, t.numero_scheda_attivita, t.tipo_tessera, t.gioca,
+                       t.numero_tessera, t.numero_scheda_attivita, t.tipo_tessera, t.numero_maglia, t.gioca,
                        c.data_scadenza, c.stato_idoneita
                 FROM tesserati_calcio t
                 JOIN anagrafiche a ON a.id = t.anagrafica_id
@@ -1070,7 +1084,8 @@ elif menu == "Distinte di Gara":
                 tipo_def = sal.get("tipo_tessera") or ("A" if p.get("numero_scheda_attivita") else (p.get("tipo_tessera") or "A"))
                 cols = st.columns([3, 1, 1, 1, 1.2, 2])
                 cols[0].markdown(f"**{p['denominazione']}**  \n{'scheda attività' if p.get('numero_scheda_attivita') else 'tessera'} {numero}")
-                maglia = cols[1].number_input("Maglia", 0, 99, int(sal.get("numero_maglia") or i + 1), key=f"{k}m{pid}", label_visibility="collapsed")
+                # Proposta: numero della distinta salvata, altrimenti la maglia abituale del tesserato (0 = da assegnare)
+                maglia = cols[1].number_input("Maglia", 0, 99, int(sal.get("numero_maglia") or p.get("numero_maglia") or 0), key=f"{k}m{pid}", label_visibility="collapsed")
                 opz_cap = ["—", "C", "VC"]
                 cap = cols[2].selectbox("Cap.", opz_cap, index=opz_cap.index(sal.get("capitano") or "—"), key=f"{k}c{pid}", label_visibility="collapsed")
                 cap = "" if cap == "—" else cap
