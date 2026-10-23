@@ -8,7 +8,7 @@ import warnings
 import pandas as pd
 import streamlit as st
 from contextlib import contextmanager
-from modules import backup, distinte, esercizio, lavoro_sportivo, libro_soci, quote, tesseramento
+from modules import backup, distinte, esercizio, lavoro_sportivo, libro_soci, preventivo, quote, tesseramento
 from modules.db import PIANO_DEI_CONTI_ASD, get_connection, init_db, usa_turso
 
 # ---------------------------------------------------------
@@ -16,7 +16,7 @@ from modules.db import PIANO_DEI_CONTI_ASD, get_connection, init_db, usa_turso
 # ---------------------------------------------------------
 # Incrementare a ogni modifica dello schema del DB: forza init_db() (e le migrazioni)
 # anche quando Streamlit Cloud aggiorna il codice senza riavviare il server.
-VERSIONE_SCHEMA_DB = 10
+VERSIONE_SCHEMA_DB = 11
 
 @st.cache_resource
 def _setup_database(versione_schema):
@@ -2531,6 +2531,118 @@ def pagina_backup():
         st.dataframe(pd.DataFrame(conteggi_es), hide_index=True)
 
 
+def pagina_preventivo():
+    st.subheader("🎯 Preventivo e consuntivo dell'esercizio")
+    st.caption("Indica quanto prevedi di incassare e spendere per ogni voce: l'app lo confronta con quanto registrato in prima nota.")
+    mese_ini_pv = mese_inizio_esercizio()
+    oggi_pv = datetime.date.today()
+    periodi_pv = {}
+    for d in (oggi_pv + datetime.timedelta(days=366), oggi_pv):
+        ini_v, fin_v, etich_v = esercizio.periodo_esercizio(d, mese_ini_pv)
+        periodi_pv[etich_v] = (ini_v, fin_v)
+    date_pv = leggi_df("SELECT DISTINCT data_registrazione FROM movimenti_prima_nota WHERE data_registrazione IS NOT NULL")
+    for d in pd.to_datetime(date_pv["data_registrazione"], errors="coerce").dropna():
+        ini_v, fin_v, etich_v = esercizio.periodo_esercizio(d.date(), mese_ini_pv)
+        periodi_pv.setdefault(etich_v, (ini_v, fin_v))
+    etich_oggi = esercizio.periodo_esercizio(oggi_pv, mese_ini_pv)[2]
+    elenco_pv = sorted(periodi_pv, reverse=True)
+    es_pv = st.selectbox("Esercizio", elenco_pv, index=elenco_pv.index(etich_oggi), key="pv_esercizio")
+    ini_pv, fin_pv = periodi_pv[es_pv]
+    st.caption(f"Dal {ini_pv.strftime('%d/%m/%Y')} al {fin_pv.strftime('%d/%m/%Y')}.")
+
+    df_conti_pv = leggi_df("SELECT codice, nome, tipo FROM piano_dei_conti WHERE livello = 3 AND tipo IN ('RICAVO', 'COSTO') ORDER BY tipo DESC, codice")
+    df_salvato = leggi_df("SELECT codice_conto, importo FROM preventivi WHERE esercizio = ?", [es_pv])
+    salvato = {r.codice_conto: float(r.importo) for r in df_salvato.itertuples()}
+
+    def movimenti_periodo(inizio, fine):
+        return leggi_df(
+            """
+            SELECT p.codice, p.tipo, COALESCE(SUM(r.dare), 0.0) AS dare, COALESCE(SUM(r.avere), 0.0) AS avere
+            FROM righe_prima_nota r
+            JOIN movimenti_prima_nota m ON m.id = r.movimento_id
+            JOIN piano_dei_conti p ON p.id = r.sottoconto_id
+            WHERE m.data_registrazione BETWEEN ? AND ? AND p.tipo IN ('RICAVO', 'COSTO')
+            GROUP BY p.codice, p.tipo
+            """, [str(inizio), str(fine)])
+
+    realizzato = preventivo.consuntivo(movimenti_periodo(ini_pv, fin_pv))
+    chiave = f"pv_{es_pv}_"
+
+    tab_conf, tab_mod = st.tabs(["📊 Confronto", "✏️ Imposta il preventivo"])
+
+    with tab_mod:
+        st.write("Puoi partire da una proposta e poi correggere gli importi. Niente viene salvato finché non premi «Salva il preventivo».")
+        b1, b2 = st.columns(2)
+        if b1.button("⚙️ Proponi dai parametri della stagione", key=chiave + "da_param",
+                     help="Quote dovute dai tesserati attivi e costi di tesseramenti, affiliazione e iscrizione ai campionati."):
+            df_tess_pv, _ = dati_quote(ini_pv, fin_pv)
+            proposta = preventivo.proposta_da_parametri(df_tess_pv, parametri_esercizio(es_pv))
+            if not proposta:
+                st.warning(f"Nessun parametro impostato per l'esercizio {es_pv} (Impostazioni → Parametri stagione).")
+            for codice, importo in proposta.items():
+                st.session_state[chiave + codice] = float(importo)
+        ini_prec, fin_prec, etich_prec = esercizio.esercizio_precedente(ini_pv, mese_ini_pv)
+        if b2.button(f"📋 Copia il consuntivo dell'esercizio {etich_prec}", key=chiave + "da_prec"):
+            cons_prec = preventivo.consuntivo(movimenti_periodo(ini_prec, fin_prec))
+            if not cons_prec:
+                st.warning(f"Nessun movimento registrato nell'esercizio {etich_prec}.")
+            for codice, importo in cons_prec.items():
+                st.session_state[chiave + codice] = max(float(importo), 0.0)
+
+        valori_pv = {}
+        for tipo_pv, titolo_pv in (("RICAVO", "**Entrate previste**"), ("COSTO", "**Uscite previste**")):
+            st.markdown(titolo_pv)
+            conti_tipo = df_conti_pv[df_conti_pv["tipo"] == tipo_pv]
+            colonne_pv = st.columns(2)
+            for i, c in enumerate(conti_tipo.itertuples()):
+                k = chiave + c.codice
+                if k not in st.session_state:
+                    st.session_state[k] = salvato.get(c.codice, 0.0)
+                valori_pv[c.codice] = colonne_pv[i % 2].number_input(f"{c.codice} {c.nome} (€)", min_value=0.0, step=50.0, key=k)
+        tot_e = sum(v for c, v in valori_pv.items() if c in set(df_conti_pv.loc[df_conti_pv["tipo"] == "RICAVO", "codice"]))
+        tot_u = sum(valori_pv.values()) - tot_e
+        st.info(f"Entrate previste € {tot_e:,.2f} – uscite previste € {tot_u:,.2f} = **avanzo previsto € {tot_e - tot_u:,.2f}**")
+        if st.button("💾 Salva il preventivo", key=chiave + "salva", type="primary"):
+            try:
+                with db_write() as w_conn:
+                    w_conn.execute("DELETE FROM preventivi WHERE esercizio = ?", [es_pv])
+                    for codice, importo in valori_pv.items():
+                        if importo:
+                            w_conn.execute("INSERT INTO preventivi (esercizio, codice_conto, importo) VALUES (?, ?, ?)", [es_pv, codice, float(importo)])
+                for k in [k for k in st.session_state if str(k).startswith(chiave)]:
+                    del st.session_state[k]
+                st.session_state["flash"] = f"Preventivo {es_pv} salvato."
+                st.rerun()
+            except Exception as ex_pv:
+                st.error(f"Errore nel salvataggio del preventivo: {ex_pv}")
+
+    with tab_conf:
+        df_conf = preventivo.confronto(df_conti_pv, salvato, realizzato)
+        if not salvato:
+            st.info(f"Il preventivo {es_pv} non è ancora impostato: compilalo nella scheda «✏️ Imposta il preventivo». "
+                    "Intanto qui sotto vedi solo il consuntivo.")
+        prev_e, prev_u, cons_e, cons_u = preventivo.totali(df_conf)
+        p1, p2, p3 = st.columns(3)
+        p1.metric("Entrate", f"€ {cons_e:,.2f}", f"previste € {prev_e:,.2f}", delta_color="off")
+        p2.metric("Uscite", f"€ {cons_u:,.2f}", f"previste € {prev_u:,.2f}", delta_color="off")
+        p3.metric("Avanzo / disavanzo", f"€ {cons_e - cons_u:,.2f}", f"previsto € {prev_e - prev_u:,.2f}", delta_color="off")
+        if oggi_pv < ini_pv:
+            st.caption("L'esercizio non è ancora iniziato.")
+        elif oggi_pv <= fin_pv:
+            trascorso = (oggi_pv - ini_pv).days + 1
+            durata = (fin_pv - ini_pv).days + 1
+            st.caption(f"Trascorso il {trascorso / durata * 100:.0f}% dell'esercizio: è normale che il consuntivo sia ancora più basso del preventivo.")
+        st.dataframe(df_conf, width="stretch", hide_index=True)
+        if not df_conf.empty:
+            buf_pv = io.BytesIO()
+            with pd.ExcelWriter(buf_pv, engine="openpyxl") as writer:
+                backup.scrivi_foglio(writer, "Preventivo e consuntivo", df_conf,
+                                     riga_titolo=f"Preventivo e consuntivo {NOME_SOCIETA} - esercizio {es_pv}".replace("  ", " "))
+            st.download_button(f"📥 Scarica preventivo e consuntivo {es_pv} (.xlsx)", buf_pv.getvalue(),
+                               file_name=f"preventivo_{es_pv.replace('/', '-')}.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
 # ---------------------------------------------------------
 # MENU LATERALE A SEZIONI
 # ---------------------------------------------------------
@@ -2550,6 +2662,7 @@ pagina = st.navigation({
     "Contabilità": [
         st.Page(pagina_prima_nota, title="Prima nota, rendiconto e apertura", icon="📖", url_path="prima-nota"),
         st.Page(pagina_estratti_conto, title="Estratti conto", icon="🏦", url_path="estratti-conto"),
+        st.Page(pagina_preventivo, title="Preventivo e consuntivo", icon="🎯", url_path="preventivo"),
     ],
     "Impostazioni": [
         st.Page(pagina_parametri, title="Parametri stagione", icon="⚙️", url_path="parametri"),

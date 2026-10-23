@@ -441,6 +441,16 @@ def init_db():
     );
     """)
 
+    # 18. Preventivo dell'esercizio: importo previsto per ogni conto di costo o di ricavo
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS preventivi (
+        esercizio TEXT NOT NULL,
+        codice_conto TEXT NOT NULL,
+        importo REAL NOT NULL DEFAULT 0.00,
+        PRIMARY KEY (esercizio, codice_conto)
+    );
+    """)
+
     # Migrazione: socio di un'altra società, qui tesserato solo con la scheda attività
     try:
         cursor.execute("ALTER TABLE tesserati_calcio ADD COLUMN socio_altra_societa INTEGER NOT NULL DEFAULT 0;")
