@@ -461,6 +461,8 @@ def init_db():
         "ALTER TABLE tesserati_calcio ADD COLUMN numero_maglia INTEGER;",
         # Libro soci: data in cui la persona ha smesso di essere socia (stato INATTIVO)
         "ALTER TABLE tesserati_calcio ADD COLUMN data_uscita TEXT;",
+        # Lavoro sportivo: collaboratore già iscritto ad altra previdenza obbligatoria o pensionato (aliquota INPS diversa)
+        "ALTER TABLE collaboratori_sportivi ADD COLUMN altra_previdenza INTEGER NOT NULL DEFAULT 0;",
     ):
         try:
             cursor.execute(alter_sql)
