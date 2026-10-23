@@ -2382,10 +2382,122 @@ def pagina_prima_nota():
                         except Exception as ex_pn:
                             st.error(f"Errore durante il salvataggio in Prima Nota: {ex_pn}")
 
+        with st.expander("✏️ Modifica o elimina una registrazione"):
+            st.caption("Scegli la registrazione dal numero (colonna «N° reg.» del giornale qui sotto), dalla data o dalla causale. "
+                       "Puoi cambiare data, documento, causale, conti e importi, aggiungere righe o toglierne una mettendo a zero "
+                       "dare e avere. Il totale DARE deve restare uguale al totale AVERE.")
+            df_mov = leggi_df(
+                "SELECT m.id, m.data_registrazione, m.numero_documento, m.causale, m.tipo_attivita, COALESCE(SUM(r.dare), 0) AS totale "
+                "FROM movimenti_prima_nota m LEFT JOIN righe_prima_nota r ON r.movimento_id = m.id "
+                "GROUP BY m.id ORDER BY m.data_registrazione DESC, m.id DESC LIMIT 1000")
+            if df_mov.empty:
+                st.info("Nessuna registrazione in prima nota.")
+            else:
+                filtro_mov = st.text_input("Cerca (causale, documento o numero)", key="pn_mod_cerca")
+                if filtro_mov.strip():
+                    f_mov = filtro_mov.strip().lower()
+                    df_mov = df_mov[df_mov.apply(lambda r: f_mov in f"{r['id']} {r['numero_documento']} {r['causale']}".lower(), axis=1)]
+                if df_mov.empty:
+                    st.warning("Nessuna registrazione trovata.")
+                else:
+                    etichette_mov = {
+                        f"N° {r.id} · {pd.to_datetime(r.data_registrazione, errors='coerce').strftime('%d/%m/%Y') if pd.notna(pd.to_datetime(r.data_registrazione, errors='coerce')) else r.data_registrazione}"
+                        f" · {r.numero_documento or '—'} · {r.causale} · € {float(r.totale):,.2f}": int(r.id)
+                        for r in df_mov.itertuples()}
+                    mov_sel = etichette_mov[st.selectbox("Registrazione", list(etichette_mov), key="pn_mod_sel")]
+                    testata = df_mov[df_mov["id"] == mov_sel].iloc[0]
+                    df_righe_mod = leggi_df(
+                        "SELECT r.sottoconto_id, r.descrizione, r.dare, r.avere FROM righe_prima_nota r WHERE r.movimento_id = ? ORDER BY r.id", [mov_sel])
+                    collegamenti = leggi_df(
+                        "SELECT 'apertura' AS tipo, esercizio AS rif FROM aperture_esercizio WHERE movimento_id = ? "
+                        "UNION ALL SELECT 'incasso_sponsor', CAST(id AS TEXT) FROM incassi_sponsor WHERE movimento_id = ? "
+                        "UNION ALL SELECT 'ricevuta', numero_ricevuta FROM ricevute_istituzionali WHERE numero_ricevuta = ? AND data_emissione = ? "
+                        "UNION ALL SELECT 'fattura', numero_fattura FROM fatture_sponsor_398 WHERE numero_fattura = ? AND data_fattura = ?",
+                        [mov_sel, mov_sel, str(testata["numero_documento"]), str(testata["data_registrazione"]),
+                         str(testata["numero_documento"]), str(testata["data_registrazione"])])
+                    tipi_coll = set(collegamenti["tipo"])
+                    if "apertura" in tipi_coll:
+                        st.info("È la scrittura di apertura dell'esercizio: si modifica dalla scheda «📂 Apertura esercizio».")
+                    else:
+                        if "ricevuta" in tipi_coll or "fattura" in tipi_coll:
+                            st.warning("Questa registrazione è nata da una ricevuta o da una fattura: qui cambi solo la contabilità, "
+                                       "il documento resta com'è. Se l'errore è nel documento, correggi anche quello.")
+                        if "incasso_sponsor" in tipi_coll:
+                            st.warning("Questa registrazione è collegata a un incasso da sponsor: se la modifichi, l'importo dell'incasso nella pagina Sponsor "
+                                       "non cambia; se la elimini, viene eliminato anche l'incasso.")
+                        conti_mod = {row["conto"]: int(row["id"]) for _, row in df_pdc.iterrows()}
+                        nomi_per_id = {v: k for k, v in conti_mod.items()}
+                        elenco_conti = list(conti_mod)
+                        km = f"pn_mod_{mov_sel}_"
+                        with st.form(f"modifica_movimento_{mov_sel}"):
+                            m1, m2, m3, m4 = st.columns([1, 1, 2, 1])
+                            data_m = m1.date_input("Data", value=pd.to_datetime(testata["data_registrazione"]).date(), format="DD/MM/YYYY", key=km + "data")
+                            doc_m = m2.text_input("Documento", value=str(testata["numero_documento"] or ""), key=km + "doc")
+                            causale_m = m3.text_input("Causale", value=str(testata["causale"] or ""), key=km + "causale")
+                            tipi_att = ["ISTITUZIONALE", "COMMERCIALE_398"]
+                            att_m = m4.selectbox("Attività", tipi_att, index=tipi_att.index(testata["tipo_attivita"]) if testata["tipo_attivita"] in tipi_att else 0,
+                                                 key=km + "att")
+                            righe_input = []
+                            esistenti = list(df_righe_mod.itertuples())
+                            for i in range(len(esistenti) + 2):
+                                r_es = esistenti[i] if i < len(esistenti) else None
+                                c1, c2, c3, c4 = st.columns([3, 2, 1, 1])
+                                conto_def = nomi_per_id.get(int(r_es.sottoconto_id)) if r_es is not None else None
+                                opzioni_c = (["—"] if r_es is None else []) + elenco_conti
+                                conto_r = c1.selectbox(f"Conto riga {i + 1}", opzioni_c, index=opzioni_c.index(conto_def) if conto_def in opzioni_c else 0,
+                                                       key=f"{km}conto{i}", label_visibility="visible" if i == 0 else "collapsed")
+                                desc_r = c2.text_input(f"Descrizione riga {i + 1}", value=str(r_es.descrizione or "") if r_es is not None else "",
+                                                       key=f"{km}desc{i}", label_visibility="visible" if i == 0 else "collapsed")
+                                dare_r = c3.number_input(f"Dare riga {i + 1} (€)", min_value=0.0, step=10.0, value=float(r_es.dare or 0) if r_es is not None else 0.0,
+                                                         key=f"{km}dare{i}", label_visibility="visible" if i == 0 else "collapsed")
+                                avere_r = c4.number_input(f"Avere riga {i + 1} (€)", min_value=0.0, step=10.0, value=float(r_es.avere or 0) if r_es is not None else 0.0,
+                                                          key=f"{km}avere{i}", label_visibility="visible" if i == 0 else "collapsed")
+                                righe_input.append((conto_r, desc_r, dare_r, avere_r))
+                            st.caption("Le ultime due righe sono vuote: usale per aggiungere conti. Per togliere una riga metti a zero dare e avere.")
+                            if st.form_submit_button("💾 Salva le modifiche", type="primary"):
+                                righe_ok = [(conti_mod[c], d, round(float(da), 2), round(float(av), 2))
+                                            for c, d, da, av in righe_input if c != "—" and (da > 0 or av > 0)]
+                                tot_d = round(sum(r[2] for r in righe_ok), 2)
+                                tot_a = round(sum(r[3] for r in righe_ok), 2)
+                                if any(c == "—" and (da > 0 or av > 0) for c, _, da, av in righe_input):
+                                    st.error("Scegli il conto per ogni riga con un importo.")
+                                elif any(r[2] > 0 and r[3] > 0 for r in righe_ok):
+                                    st.error("Una riga può avere un importo in DARE oppure in AVERE, non in entrambi.")
+                                elif len(righe_ok) < 2:
+                                    st.error("Servono almeno due righe con un importo.")
+                                elif tot_d != tot_a:
+                                    st.error(f"La scrittura non è bilanciata: DARE € {tot_d:,.2f}, AVERE € {tot_a:,.2f} (differenza € {tot_d - tot_a:,.2f}).")
+                                else:
+                                    try:
+                                        with db_write() as w_conn:
+                                            w_conn.execute("UPDATE movimenti_prima_nota SET data_registrazione = ?, numero_documento = ?, causale = ?, tipo_attivita = ? WHERE id = ?",
+                                                           [str(data_m), doc_m.strip(), causale_m.strip(), att_m, int(mov_sel)])
+                                            w_conn.execute("DELETE FROM righe_prima_nota WHERE movimento_id = ?", [int(mov_sel)])
+                                            for acc_id, desc, dare, avere in righe_ok:
+                                                w_conn.execute("INSERT INTO righe_prima_nota (movimento_id, sottoconto_id, descrizione, dare, avere) VALUES (?, ?, ?, ?, ?)",
+                                                               [int(mov_sel), int(acc_id), str(desc).strip(), dare, avere])
+                                        st.session_state["flash"] = f"Registrazione N° {mov_sel} modificata."
+                                        st.rerun()
+                                    except Exception as ex_mod:
+                                        st.error(f"Errore durante il salvataggio: {ex_mod}")
+
+                        conferma_del = st.checkbox("Confermo di voler eliminare questa registrazione", key=km + "conferma")
+                        if st.button("🗑️ Elimina la registrazione", key=km + "elimina", disabled=not conferma_del):
+                            try:
+                                with db_write() as w_conn:
+                                    w_conn.execute("DELETE FROM incassi_sponsor WHERE movimento_id = ?", [int(mov_sel)])
+                                    w_conn.execute("DELETE FROM righe_prima_nota WHERE movimento_id = ?", [int(mov_sel)])
+                                    w_conn.execute("DELETE FROM movimenti_prima_nota WHERE id = ?", [int(mov_sel)])
+                                st.session_state["flash"] = f"Registrazione N° {mov_sel} eliminata" + (
+                                    " insieme all'incasso da sponsor collegato." if "incasso_sponsor" in tipi_coll else ".")
+                                st.rerun()
+                            except Exception as ex_del:
+                                st.error(f"Errore durante l'eliminazione: {ex_del}")
+
         st.divider()
         df_pn = leggi_df(
             """
-            SELECT m.data_registrazione as Data, m.numero_documento as Doc, m.causale as Causale, 
+            SELECT m.id as 'N° reg.', m.data_registrazione as Data, m.numero_documento as Doc, m.causale as Causale, 
                    m.tipo_attivita as Attività, p.codice || ' - ' || p.nome as Sottoconto, 
                    r.dare as 'Dare (€)', r.avere as 'Avere (€)'
             FROM righe_prima_nota r
@@ -2393,7 +2505,7 @@ def pagina_prima_nota():
             JOIN piano_dei_conti p ON r.sottoconto_id = p.id
             ORDER BY m.id DESC, r.id ASC LIMIT 500
             """)
-        st.dataframe(df_pn, width="stretch")
+        st.dataframe(df_pn, width="stretch", hide_index=True)
 
     with tab_rendiconto:
         st.markdown("### 🏛️ Rendiconto Economico-Finanziario dell'Esercizio")
