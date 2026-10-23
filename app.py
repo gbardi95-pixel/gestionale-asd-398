@@ -8,7 +8,7 @@ import warnings
 import pandas as pd
 import streamlit as st
 from contextlib import contextmanager
-from modules import backup, distinte, esercizio, libro_soci, quote, tesseramento
+from modules import backup, distinte, esercizio, lavoro_sportivo, libro_soci, quote, tesseramento
 from modules.db import PIANO_DEI_CONTI_ASD, get_connection, init_db, usa_turso
 
 # ---------------------------------------------------------
@@ -1813,19 +1813,104 @@ def pagina_sponsor():
 def pagina_lavoro_sportivo():
     st.subheader("⚽ Gestione Staff Tecnico, Compensi Sportivi e Trasferte Campionato")
 
-    tab_comp, tab_rimb = st.tabs(["Compensi Collaboratori Sportivi", "Rimborsi Spesa Trasferta Partite"])
+    tab_coll, tab_comp, tab_riep, tab_rimb = st.tabs(["👥 Collaboratori", "💶 Compensi", "📊 Riepilogo annuale", "🚗 Rimborsi trasferta"])
+    ls = lavoro_sportivo
+    df_staff = leggi_df(
+        "SELECT c.id, c.anagrafica_id, a.denominazione, a.codice_fiscale, c.mansione, c.tipo_contratto, c.compenso_pattuito "
+        "FROM collaboratori_sportivi c JOIN anagrafiche a ON c.anagrafica_id = a.id ORDER BY a.denominazione")
+
+    with tab_coll:
+        if not df_staff.empty:
+            st.dataframe(pd.DataFrame({
+                "Collaboratore": df_staff["denominazione"], "Codice fiscale": df_staff["codice_fiscale"], "Mansione": df_staff["mansione"],
+                "Contratto": df_staff["tipo_contratto"].map(lambda t: ls.CONTRATTI.get(t, t)),
+                "Compenso pattuito (€)": df_staff["compenso_pattuito"]}), width="stretch", hide_index=True)
+        else:
+            st.info("Nessun collaboratore registrato: aggiungilo qui sotto.")
+
+        df_persone = leggi_df("SELECT id, denominazione, codice_fiscale FROM anagrafiche WHERE tipo <> 'SPONSOR' AND tipo <> 'FORNITORE' ORDER BY denominazione")
+        gia_coll = set(df_staff["anagrafica_id"].astype(int)) if not df_staff.empty else set()
+        NUOVA = "— Nuova persona —"
+        opzioni_pers = {NUOVA: None}
+        opzioni_pers.update({f"{r.denominazione} ({r.codice_fiscale or 'CF mancante'})": int(r.id)
+                             for r in df_persone.itertuples() if int(r.id) not in gia_coll})
+        with st.form("nuovo_collaboratore", clear_on_submit=True):
+            st.markdown("**➕ Nuovo collaboratore**")
+            pers_sel = st.selectbox("Persona già in anagrafica (soci, dirigenti…) oppure nuova", list(opzioni_pers))
+            n1, n2 = st.columns(2)
+            nuovo_nome = n1.text_input("Cognome e nome (solo per una nuova persona)")
+            nuovo_cf = n2.text_input("Codice fiscale (solo per una nuova persona)")
+            k1, k2, k3 = st.columns(3)
+            mansione_c = k1.text_input("Mansione", placeholder="es. Allenatore prima squadra")
+            contratto_c = k2.selectbox("Tipo di rapporto", list(ls.CONTRATTI), format_func=lambda t: ls.CONTRATTI[t])
+            pattuito_c = k3.number_input("Compenso pattuito (€)", min_value=0.0, step=50.0)
+            if st.form_submit_button("Registra collaboratore"):
+                anag_id_c = opzioni_pers[pers_sel]
+                if anag_id_c is None and not nuovo_nome.strip():
+                    st.error("Scegli una persona dall'elenco o scrivi cognome e nome di quella nuova.")
+                elif not mansione_c.strip():
+                    st.error("Indica la mansione.")
+                else:
+                    try:
+                        with db_write() as w_conn:
+                            if anag_id_c is None:
+                                anag_id_c = w_conn.execute(
+                                    "INSERT INTO anagrafiche (tipo, denominazione, codice_fiscale) VALUES ('COLLABORATORE_SPORTIVO', ?, ?)",
+                                    [nuovo_nome.strip(), nuovo_cf.strip().upper() or None]).lastrowid
+                            w_conn.execute(
+                                "INSERT INTO collaboratori_sportivi (anagrafica_id, mansione, tipo_contratto, compenso_pattuito) VALUES (?, ?, ?, ?)",
+                                [int(anag_id_c), mansione_c.strip(), contratto_c, float(pattuito_c)])
+                        st.session_state["flash"] = "Collaboratore registrato."
+                        st.rerun()
+                    except Exception as ex_coll:
+                        st.error(f"Errore durante la registrazione: {ex_coll}")
+
+        if not df_staff.empty:
+            with st.expander("✏️ Modifica o elimina un collaboratore"):
+                coll_mod = {f"{r.denominazione} ({r.mansione})": r for r in df_staff.itertuples()}
+                sel_mod = st.selectbox("Collaboratore", list(coll_mod), key="coll_mod_sel")
+                r_mod = coll_mod[sel_mod]
+                with st.form(f"modifica_collaboratore_{r_mod.id}"):
+                    m1, m2, m3 = st.columns(3)
+                    mansione_m = m1.text_input("Mansione", value=r_mod.mansione)
+                    contratti_l = list(ls.CONTRATTI)
+                    contratto_m = m2.selectbox("Tipo di rapporto", contratti_l, format_func=lambda t: ls.CONTRATTI[t],
+                                               index=contratti_l.index(r_mod.tipo_contratto) if r_mod.tipo_contratto in contratti_l else 0)
+                    pattuito_m = m3.number_input("Compenso pattuito (€)", min_value=0.0, step=50.0, value=float(r_mod.compenso_pattuito or 0))
+                    if st.form_submit_button("💾 Salva modifiche"):
+                        try:
+                            with db_write() as w_conn:
+                                w_conn.execute("UPDATE collaboratori_sportivi SET mansione = ?, tipo_contratto = ?, compenso_pattuito = ? WHERE id = ?",
+                                               [mansione_m.strip() or r_mod.mansione, contratto_m, float(pattuito_m), int(r_mod.id)])
+                            st.session_state["flash"] = "Collaboratore aggiornato."
+                            st.rerun()
+                        except Exception as ex_mod:
+                            st.error(f"Errore durante il salvataggio: {ex_mod}")
+                if st.button("🗑️ Elimina collaboratore", key=f"coll_del_{r_mod.id}"):
+                    conn = get_ro_conn()
+                    try:
+                        n_comp = conn.execute("SELECT COUNT(*) FROM compensi_sportivi WHERE collaboratore_id = ?", [int(r_mod.id)]).fetchone()[0]
+                    finally:
+                        conn.close()
+                    if n_comp:
+                        st.error(f"Non si può eliminare: ha {n_comp} compensi registrati.")
+                    else:
+                        try:
+                            with db_write() as w_conn:
+                                w_conn.execute("DELETE FROM collaboratori_sportivi WHERE id = ?", [int(r_mod.id)])
+                            st.session_state["flash"] = "Collaboratore eliminato (la persona resta in anagrafica)."
+                            st.rerun()
+                        except Exception as ex_del:
+                            st.error(f"Errore durante l'eliminazione: {ex_del}")
 
     with tab_comp:
-        df_staff = leggi_df(
-            "SELECT c.id, a.denominazione, c.mansione, c.tipo_contratto FROM collaboratori_sportivi c JOIN anagrafiche a ON c.anagrafica_id = a.id ORDER BY a.denominazione")
-
         if not df_staff.empty:
             staff_dict = {f"{row['denominazione']} ({row['mansione']})": int(row["id"]) for _, row in df_staff.iterrows()}
 
             with st.form("nuovo_compenso", clear_on_submit=True):
                 staff_sel = st.selectbox("Seleziona Collaboratore Sportivo", list(staff_dict.keys()))
                 c1, c2, c3 = st.columns(3)
-                data_erog = c1.date_input("Data Erogazione")
+                data_erog = c1.date_input("Data Erogazione", format="DD/MM/YYYY")
                 anno_erog = str(data_erog.year)
                 causale_c = c2.text_input("Causale", value="Compenso attività sportiva allenatore Mese")
                 importo_lordo = c3.number_input("Importo Lordo (€)", min_value=0.01, step=50.0)
@@ -1845,19 +1930,7 @@ def pagina_lavoro_sportivo():
                             finally:
                                 conn.close()
 
-                            new_prog = prev_prog + importo_lordo
-
-                            base_inps_prev = max(0.0, prev_prog - 5000.0)
-                            base_inps_new = max(0.0, new_prog - 5000.0)
-                            inc_inps = base_inps_new - base_inps_prev
-                            rit_inps = inc_inps * 0.25 * 0.50
-
-                            base_irpef_prev = max(0.0, prev_prog - 15000.0)
-                            base_irpef_new = max(0.0, new_prog - 15000.0)
-                            inc_irpef = base_irpef_new - base_irpef_prev
-                            rit_irpef = inc_irpef * 0.23
-
-                            importo_netto = importo_lordo - rit_inps - rit_irpef
+                            rit_inps, rit_irpef, importo_netto, new_prog = ls.ritenute(float(prev_prog), float(importo_lordo))
 
                             with db_write() as w_conn:
                                 w_conn.execute(
@@ -1870,11 +1943,56 @@ def pagina_lavoro_sportivo():
                             st.rerun()
                         except Exception as ex_comp:
                             st.error(f"Errore durante l'erogazione del compenso: {ex_comp}")
+            df_ultimi = leggi_df(
+                "SELECT c.data_erogazione AS Data, a.denominazione AS Collaboratore, c.causale AS Causale, c.importo_lordo AS 'Lordo (€)', "
+                "c.ritenuta_inps AS 'Ritenuta INPS (€)', c.ritenuta_irpef AS 'Ritenuta IRPEF (€)', c.importo_netto AS 'Netto (€)', "
+                "c.progressivo_irpef_anno AS 'Progressivo anno (€)' "
+                "FROM compensi_sportivi c JOIN collaboratori_sportivi s ON s.id = c.collaboratore_id JOIN anagrafiche a ON a.id = s.anagrafica_id "
+                "ORDER BY c.data_erogazione DESC, c.id DESC LIMIT 100")
+            if not df_ultimi.empty:
+                st.markdown("**Ultimi compensi registrati**")
+                st.dataframe(df_ultimi, width="stretch", hide_index=True)
         else:
-            st.warning("Registra prima un collaboratore sportivo nell'Anagrafica prima di poter erogare compensi.")
+            st.warning("Registra prima un collaboratore nella scheda «👥 Collaboratori».")
+
+    with tab_riep:
+        st.markdown("#### 📊 Compensi dell'anno per collaboratore")
+        st.caption("Anno solare (dal 1° gennaio al 31 dicembre), come per la Certificazione Unica. "
+                   f"Soglie usate dall'app: INPS € {ls.FRANCHIGIA_INPS:,.0f}, IRPEF € {ls.FRANCHIGIA_IRPEF:,.0f} all'anno. "
+                   "Soglie e aliquote vanno confermate con il consulente; la soglia vale sul totale dei compensi sportivi "
+                   "che la persona riceve nell'anno anche da altre società.")
+        anni_comp = leggi_df("SELECT DISTINCT strftime('%Y', data_erogazione) AS anno FROM compensi_sportivi WHERE data_erogazione IS NOT NULL")
+        anni_r = sorted({str(datetime.date.today().year)} | {a for a in anni_comp["anno"].dropna()}, reverse=True)
+        anno_r = st.selectbox("Anno", anni_r, key="riep_anno")
+        df_tot_comp = leggi_df(
+            "SELECT collaboratore_id, COUNT(*) AS n, SUM(importo_lordo) AS lordo, SUM(ritenuta_inps) AS inps, SUM(ritenuta_irpef) AS irpef, "
+            "SUM(importo_netto) AS netto FROM compensi_sportivi WHERE strftime('%Y', data_erogazione) = ? GROUP BY collaboratore_id", [anno_r])
+        df_tot_rimb = leggi_df(
+            "SELECT anagrafica_id, SUM(totale_rimborso) AS rimborsi FROM rimborsi_trasferta WHERE strftime('%Y', data_partita) = ? GROUP BY anagrafica_id", [anno_r])
+        df_riep = ls.riepilogo_annuale(df_staff, df_tot_comp, df_tot_rimb)
+        if df_riep.empty:
+            st.info("Nessun collaboratore registrato.")
+        else:
+            t1, t2, t3, t4 = st.columns(4)
+            t1.metric("Lordo", f"€ {df_riep['Lordo (€)'].sum():,.2f}")
+            t2.metric("Ritenute INPS", f"€ {df_riep['Ritenute INPS (€)'].sum():,.2f}")
+            t3.metric("Ritenute IRPEF", f"€ {df_riep['Ritenute IRPEF (€)'].sum():,.2f}")
+            t4.metric("Netto pagato", f"€ {df_riep['Netto (€)'].sum():,.2f}")
+            st.dataframe(df_riep, width="stretch", hide_index=True)
+            buf_riep = io.BytesIO()
+            with pd.ExcelWriter(buf_riep, engine="openpyxl") as writer:
+                backup.scrivi_foglio(writer, "Riepilogo", df_riep, riga_titolo=f"Compensi sportivi {NOME_SOCIETA} - anno {anno_r}".replace("  ", " "))
+                df_det = leggi_df(
+                    "SELECT a.denominazione AS Collaboratore, c.data_erogazione AS Data, c.causale AS Causale, c.importo_lordo AS 'Lordo (€)', "
+                    "c.ritenuta_inps AS 'Ritenuta INPS (€)', c.ritenuta_irpef AS 'Ritenuta IRPEF (€)', c.importo_netto AS 'Netto (€)' "
+                    "FROM compensi_sportivi c JOIN collaboratori_sportivi s ON s.id = c.collaboratore_id JOIN anagrafiche a ON a.id = s.anagrafica_id "
+                    "WHERE strftime('%Y', c.data_erogazione) = ? ORDER BY a.denominazione, c.data_erogazione", [anno_r])
+                backup.scrivi_foglio(writer, "Dettaglio compensi", df_det)
+            st.download_button(f"📥 Scarica il riepilogo {anno_r} (.xlsx)", buf_riep.getvalue(), file_name=f"compensi_sportivi_{anno_r}.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
     with tab_rimb:
-        df_anag_sport = leggi_df("SELECT id, denominazione FROM anagrafiche WHERE tipo IN ('SOCIO_CALCIATORE', 'ALTRO') ORDER BY denominazione")
+        df_anag_sport = leggi_df("SELECT id, denominazione FROM anagrafiche WHERE tipo IN ('SOCIO_CALCIATORE', 'ALTRO', 'COLLABORATORE_SPORTIVO') ORDER BY denominazione")
 
         if not df_anag_sport.empty:
             a_dict = {row["denominazione"]: int(row["id"]) for _, row in df_anag_sport.iterrows()}
