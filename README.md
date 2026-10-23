@@ -43,6 +43,10 @@ Il progetto include un modello generico (`modelli/distinta_gara.docx`). Il model
 
 Regole da seguire per modificare il codice (anche quando il codice viene generato con un assistente IA: allegare questa sezione alla richiesta).
 
+### Pagine e menu
+
+Ogni pagina è una funzione `pagina_...()` in `app.py`; il menu laterale è costruito in fondo al file con `st.navigation`, diviso in sezioni. Per aggiungere una pagina: scrivere la funzione e aggiungerla con `st.Page(...)` nella sezione giusta.
+
 ### Database: letture e scritture
 
 Il database Turso è remoto: ogni query costa 0,1–0,5 secondi e Streamlit riesegue tutta la pagina a ogni clic. Per questo:
