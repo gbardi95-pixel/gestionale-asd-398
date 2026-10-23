@@ -8,7 +8,7 @@ import warnings
 import pandas as pd
 import streamlit as st
 from contextlib import contextmanager
-from modules import backup, distinte, esercizio, lavoro_sportivo, libro_soci, preventivo, quote, tesseramento
+from modules import backup, distinte, esercizio, lavoro_sportivo, libro_soci, preventivo, quote, solleciti, tesseramento
 from modules.db import PIANO_DEI_CONTI_ASD, get_connection, init_db, usa_turso
 
 # ---------------------------------------------------------
@@ -244,6 +244,16 @@ def post_journal(conn, data_reg, num_doc, causale, tipo_att, righe):
         )
     return int(mov_id)
 
+def leggi_impostazione(chiave, predefinito=""):
+    """Valore salvato nella tabella impostazioni (testi e preferenze dell'app), o il predefinito."""
+    df = leggi_df("SELECT valore FROM impostazioni WHERE chiave = ?", [chiave])
+    return str(df["valore"].iloc[0]) if not df.empty and df["valore"].iloc[0] is not None else predefinito
+
+def salva_impostazioni(w_conn, valori):
+    for chiave, valore in valori.items():
+        w_conn.execute("INSERT INTO impostazioni (chiave, valore) VALUES (?, ?) ON CONFLICT(chiave) DO UPDATE SET valore = excluded.valore",
+                       [chiave, str(valore)])
+
 def mese_inizio_esercizio():
     """Mese di inizio dell'esercizio sociale (1 = anno solare, 7 = stagione sportiva 1/7-30/6), impostabile dall'app."""
     df = leggi_df("SELECT valore FROM impostazioni WHERE chiave = 'mese_inizio_esercizio'")
@@ -314,6 +324,8 @@ def crediti_residui(etichetta, inizio, fine, tipo):
             """
         params = [etichetta, str(inizio), str(fine), str(inizio), str(fine)]
     df = leggi_df(sql, params)
+    for col in ("iniziale", "addebitato", "incassato"):
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)  # senza righe pandas non sa che sono numeri
     df["residuo"] = (df["iniziale"] + df["addebitato"] - df["incassato"]).round(2)
     return df[(df["iniziale"] != 0) | (df["addebitato"] != 0) | (df["incassato"] != 0)].sort_values("denominazione").reset_index(drop=True)
 
@@ -869,7 +881,7 @@ def pagina_soci():
             selected_label = st.selectbox("Seleziona Persona da Modificare", list(people_dict.keys()))
             selected_anag_id = int(people_dict[selected_label])
 
-            df_a = leggi_df("SELECT denominazione, codice_fiscale, tipo_documento, numero_documento FROM anagrafiche WHERE id = ?", [selected_anag_id])
+            df_a = leggi_df("SELECT denominazione, codice_fiscale, tipo_documento, numero_documento, telefono, email FROM anagrafiche WHERE id = ?", [selected_anag_id])
             df_t = leggi_df(
                 "SELECT numero_tessera, numero_scheda_attivita, tipo_tessera, numero_maglia, categoria, ruolo, quota_stagionale, stato, gioca, socio_altra_societa, "
                 "data_tesseramento, data_uscita "
@@ -880,6 +892,8 @@ def pagina_soci():
             cur_cf = first_val(df_a, "codice_fiscale")
             cur_tipo_doc = first_val(df_a, "tipo_documento")
             cur_num_doc = first_val(df_a, "numero_documento")
+            cur_tel = first_val(df_a, "telefono")
+            cur_email = first_val(df_a, "email")
 
             has_tess = not df_t.empty
             cur_matricola = first_val(df_t, "numero_tessera")
@@ -928,6 +942,9 @@ def pagina_soci():
                 d_col1, d_col2 = st.columns(2)
                 e_tipo_doc = d_col1.text_input("Documento d'identità (es. CIE, C.I., PT)", value=cur_tipo_doc)
                 e_num_doc = d_col2.text_input("N° documento d'identità", value=cur_num_doc)
+                c_col1, c_col2 = st.columns(2)
+                e_tel = c_col1.text_input("Telefono (per i solleciti WhatsApp)", value=cur_tel)
+                e_email = c_col2.text_input("Email", value=cur_email)
                 s_col1, s_col2 = st.columns(2)
                 e_ammissione = s_col1.date_input("Data di ammissione a socio", value=cur_ammissione, format="DD/MM/YYYY",
                                                  help="Per il libro soci. Nuove schede: se vuota si usa la data di oggi.")
@@ -973,8 +990,9 @@ def pagina_soci():
                     try:
                         with db_write() as w_conn:
                             w_conn.execute(
-                                "UPDATE anagrafiche SET denominazione = ?, codice_fiscale = ?, tipo_documento = ?, numero_documento = ? WHERE id = ?",
-                                [str(e_nome).strip(), str(e_cf).strip(), str(e_tipo_doc).strip() or None, str(e_num_doc).strip() or None, int(selected_anag_id)]
+                                "UPDATE anagrafiche SET denominazione = ?, codice_fiscale = ?, tipo_documento = ?, numero_documento = ?, telefono = ?, email = ? WHERE id = ?",
+                                [str(e_nome).strip(), str(e_cf).strip(), str(e_tipo_doc).strip() or None, str(e_num_doc).strip() or None,
+                                 str(e_tel).strip() or None, str(e_email).strip() or None, int(selected_anag_id)]
                             )
 
                             if has_tess:
@@ -1091,7 +1109,7 @@ def pagina_parametri():
     ini_par, fin_par = periodi_par[es_par]
     df_par = parametri_esercizio(es_par)
 
-    tab_valori, tab_quote, tab_costo = st.tabs(["💶 Costi e quote", "📋 Situazione quote", "🏛️ Costo tesseramenti"])
+    tab_valori, tab_quote, tab_soll, tab_costo = st.tabs(["💶 Costi e quote", "📋 Situazione quote", "📣 Solleciti", "🏛️ Costo tesseramenti"])
 
     with tab_valori:
         st.caption("Costo per la società = quanto si paga all'ente per ogni tesseramento. Quota richiesta = quanto la società chiede alla persona. "
@@ -1166,6 +1184,61 @@ def pagina_parametri():
         st.dataframe(vista_sit.drop(columns=["anagrafica_id"]), width="stretch", hide_index=True)
         st.caption(f"Tesserati attivi. Versato = ricevute emesse dal {ini_par.strftime('%d/%m/%Y')} al {fin_par.strftime('%d/%m/%Y')} "
                    "(escluse quelle che incassano quote degli esercizi precedenti).")
+
+    with tab_soll:
+        st.markdown(f"#### 📣 Solleciti per le quote della stagione {es_par}")
+        st.caption("Per ognuno trovi il messaggio pronto: copialo con l'icona in alto a destra del riquadro, oppure aprilo "
+                   "direttamente in WhatsApp o nella posta. Telefono ed email si inseriscono nella scheda della persona (Soci).")
+        modello_soll = leggi_impostazione("testo_sollecito", solleciti.TESTO_PREDEFINITO)
+        pagamento_soll = leggi_impostazione("istruzioni_pagamento", "")
+        with st.expander("✏️ Testo del messaggio e istruzioni di pagamento"):
+            with st.form("form_testo_sollecito"):
+                nuovo_modello = st.text_area("Testo del messaggio", value=modello_soll, height=120)
+                st.caption("Parole tra graffe sostituite in automatico: " +
+                           "; ".join(f"{k} = {v}" for k, v in solleciti.SEGNAPOSTO.items()))
+                nuovo_pagamento = st.text_input("Istruzioni di pagamento", value=pagamento_soll,
+                                                placeholder="es. Puoi pagare con bonifico all'IBAN IT00 X000 0000 0000 0000 0000 000 o in contanti al campo")
+                fs1, fs2 = st.columns(2)
+                if fs1.form_submit_button("💾 Salva il testo"):
+                    with db_write() as w_conn:
+                        salva_impostazioni(w_conn, {"testo_sollecito": nuovo_modello.strip() or solleciti.TESTO_PREDEFINITO,
+                                                    "istruzioni_pagamento": nuovo_pagamento.strip()})
+                    st.session_state["flash"] = "Testo dei solleciti salvato."
+                    st.rerun()
+                if fs2.form_submit_button("↩️ Ripristina il testo predefinito"):
+                    with db_write() as w_conn:
+                        salva_impostazioni(w_conn, {"testo_sollecito": solleciti.TESTO_PREDEFINITO})
+                    st.session_state["flash"] = "Ripristinato il testo predefinito dei solleciti."
+                    st.rerun()
+
+        df_arr_soll = crediti_residui(es_par, ini_par, fin_par, "SOCIO")
+        df_contatti_soll = leggi_df("SELECT id, telefono, email FROM anagrafiche")
+        df_soll = solleciti.elenco(quote.situazione_quote(df_tess_par, df_par, df_vers_par), df_arr_soll, df_contatti_soll)
+        if df_soll.empty:
+            st.success("Nessuno deve pagare quote o arretrati. 🎉")
+        else:
+            s1, s2, s3 = st.columns(3)
+            s1.metric("Persone da sollecitare", len(df_soll))
+            s2.metric("Totale da incassare", solleciti.euro(df_soll["Totale (€)"].sum()))
+            s3.metric("Senza telefono né email", int(((df_soll["Telefono"] == "") & (df_soll["Email"] == "")).sum()))
+            st.dataframe(df_soll.drop(columns=["anagrafica_id"]), width="stretch", hide_index=True)
+            oggetto_soll = f"Quota stagione {es_par}" + (f" - {NOME_SOCIETA}" if NOME_SOCIETA else "")
+            for _, r in df_soll.iterrows():
+                testo_soll = solleciti.componi(modello_soll, r["Persona"], r["Quota (€)"], r["Arretrati (€)"], es_par, pagamento_soll, NOME_SOCIETA)
+                with st.container(border=True):
+                    st.markdown(f"**{r['Persona']}** – {solleciti.euro(r['Totale (€)'])}")
+                    st.code(testo_soll, language=None, wrap_lines=True)
+                    w1, w2, _ = st.columns([1, 1, 2])
+                    link_wa = solleciti.link_whatsapp(r["Telefono"], testo_soll)
+                    link_mail = solleciti.link_email(r["Email"], oggetto_soll, testo_soll)
+                    if link_wa:
+                        w1.link_button("💬 WhatsApp", link_wa)
+                    else:
+                        w1.caption("Telefono mancante o non valido")
+                    if link_mail:
+                        w2.link_button("✉️ Email", link_mail)
+                    else:
+                        w2.caption("Email mancante")
 
     with tab_costo:
         df_costo = quote.costo_tesseramenti(df_tess_par, df_par)
