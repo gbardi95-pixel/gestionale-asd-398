@@ -53,7 +53,7 @@ Ogni pagina è una funzione `pagina_...()` in `app.py`; il menu laterale è cost
 
 Il database Turso è remoto: ogni query costa 0,1–0,5 secondi e Streamlit riesegue tutta la pagina a ogni clic. Per questo:
 
-- **Letture** per mostrare dati: usare sempre `leggi_df(sql, params)`, che tiene il risultato in memoria (fino a 6 ore, svuotata a ogni salvataggio) su una connessione già aperta. Non usare `pd.read_sql_query` con una connessione propria.
+- **Letture** per mostrare dati: usare sempre `leggi_df(sql, params)`, che tiene il risultato in memoria (fino a 6 ore, svuotata a ogni salvataggio). Con Turso le letture avvengono su una copia locale del database (embedded replica di libsql, nella cartella temporanea del server): l'archivio resta su Turso, le scritture vanno sempre lì e `db_write()` riallinea la copia subito dopo ogni salvataggio (`sincronizza_letture()`); le modifiche fatte fuori dall'app arrivano entro 5 minuti o con «Ricarica dati». Per i file da scaricare usare `excel_da_fogli()`, che non ricrea il file a ogni clic. Non usare `pd.read_sql_query` con una connessione propria.
 
   ```python
   df = leggi_df("SELECT id, denominazione FROM anagrafiche WHERE tipo = ?", ["SPONSOR"])

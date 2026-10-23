@@ -70,9 +70,12 @@ def elenco(df_soci, df_versato, inizio, fine):
     return df
 
 
+def titolo(societa, etichetta, inizio, fine):
+    return f"Libro soci {societa}".strip() + f" - esercizio {etichetta} ({_it(inizio)} - {_it(fine)})"
+
+
 def excel(df, societa, etichetta, inizio, fine):
     buffer = io.BytesIO()
-    titolo = f"Libro soci {societa}".strip() + f" - esercizio {etichetta} ({_it(inizio)} - {_it(fine)})"
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        backup.scrivi_foglio(writer, "Libro soci", df, riga_titolo=titolo)
+        backup.scrivi_foglio(writer, "Libro soci", df, riga_titolo=titolo(societa, etichetta, inizio, fine))
     return buffer.getvalue()

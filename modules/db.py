@@ -111,6 +111,38 @@ def get_connection():
     return conn
 
 
+def connessione_replica():
+    """Copia locale del database Turso, solo per le letture (None se Turso non è configurato o la copia non si crea).
+
+    Ogni lettura su Turso fa un viaggio fino al server del database (dall'app online circa 0,3 secondi);
+    sulla copia locale costa meno di un millesimo di secondo. L'archivio resta su Turso: le scritture vanno
+    sempre lì e la copia si riallinea con sync(). Il file sta nella cartella temporanea del server
+    e sparisce a ogni riavvio, quando viene riscaricato.
+    """
+    turso_url, turso_token = _turso_credentials()
+    if not (turso_url and turso_token):
+        return None
+    import hashlib
+    import tempfile
+    import libsql
+
+    nome = "gestionale_replica_" + hashlib.sha256(turso_url.encode()).hexdigest()[:12] + ".db"
+    percorso = os.path.join(tempfile.gettempdir(), nome)
+    for _ in range(2):
+        try:
+            conn = libsql.connect(percorso, sync_url=turso_url, auth_token=turso_token)
+            conn.sync()
+            return conn
+        except Exception:
+            # Copia rovinata o incompleta: si cancellano i file e si riprova una volta da zero
+            for suffisso in ("", "-wal", "-shm", "-info", "-client_wal_index"):
+                try:
+                    os.remove(percorso + suffisso)
+                except OSError:
+                    pass
+    return None
+
+
 def versione_schema_db():
     """Versione dello schema registrata nel database dall'ultimo aggiornamento (None se mai registrata)."""
     conn = get_connection()

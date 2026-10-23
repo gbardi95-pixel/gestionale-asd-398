@@ -11,7 +11,7 @@ import streamlit as st
 from contextlib import contextmanager
 from modules import backup, distinte, esercizio, lavoro_sportivo, libro_soci, preventivo, quote, rendiconto_pdf, solleciti, tesseramento
 from modules import cap as cap_comuni
-from modules.db import PIANO_DEI_CONTI_ASD, _turso_credentials, get_connection, init_db, usa_turso, versione_schema_db
+from modules.db import PIANO_DEI_CONTI_ASD, _turso_credentials, connessione_replica, get_connection, init_db, usa_turso, versione_schema_db
 
 # ---------------------------------------------------------
 # INIZIALIZZAZIONE & CACHING RESOURCE DB
@@ -84,6 +84,7 @@ if st.sidebar.button("🚪 Esci"):
     st.rerun()
 
 if st.sidebar.button("🔄 Ricarica dati", help="Rilegge i dati dal database (utile se sono stati modificati da un altro dispositivo)."):
+    sincronizza_letture()
     st.cache_data.clear()
     st.rerun()
 
@@ -115,6 +116,7 @@ def db_write():
             pass
         yield conn
         conn.commit()
+        sincronizza_letture()  # la copia locale per le letture riceve subito la modifica
         st.cache_data.clear()  # i dati sono cambiati: le letture in memoria vanno rifatte
     except Exception:
         try:
@@ -132,10 +134,26 @@ def get_ro_conn():
 # pandas avvisa a ogni lettura che la connessione Turso non è sqlite3: funziona, l'avviso riempie solo i log
 warnings.filterwarnings("ignore", message="pandas only supports SQLAlchemy connectable")
 
-@st.cache_resource(show_spinner=False)
-def _connessione_letture():
-    """Connessione tenuta aperta per le letture: aprirne una nuova su Turso costa circa mezzo secondo."""
-    return {"conn": get_connection(), "lock": threading.Lock()}
+@st.cache_resource(show_spinner="Preparazione dei dati…")
+def _connessione_letture(versione_schema=None):
+    """Connessione tenuta aperta per le letture: la copia locale del database Turso se disponibile, altrimenti Turso diretto.
+    versione_schema: con una nuova struttura del database si riparte da una copia nuova."""
+    replica = connessione_replica()
+    return {"conn": replica or get_connection(), "lock": threading.Lock(), "replica": replica is not None, "ultima_sync": time.time()}
+
+def sincronizza_letture(forza=True):
+    """Riallinea la copia locale con Turso (dopo un salvataggio, con «Ricarica dati» o se sono passati 5 minuti).
+    Se non ci riesce, le letture passano a Turso diretto: meglio lente che con dati vecchi."""
+    risorsa = _connessione_letture(VERSIONE_SCHEMA_DB)
+    if not risorsa["replica"] or (not forza and time.time() - risorsa["ultima_sync"] < 300):
+        return
+    with risorsa["lock"]:
+        try:
+            risorsa["conn"].sync()
+            risorsa["ultima_sync"] = time.time()
+        except Exception:
+            risorsa["conn"] = get_connection()
+            risorsa["replica"] = False
 
 @st.cache_data(ttl=6 * 3600, show_spinner=False)
 def leggi_df(sql, params=None):
@@ -143,7 +161,8 @@ def leggi_df(sql, params=None):
 
     La memoria si svuota a ogni salvataggio fatto dall'app (db_write) e con il pulsante «Ricarica dati».
     """
-    risorsa = _connessione_letture()
+    sincronizza_letture(forza=False)  # le modifiche fatte da fuori dall'app arrivano entro 5 minuti
+    risorsa = _connessione_letture(VERSIONE_SCHEMA_DB)
     parametri = list(params) if params else None
     with risorsa["lock"]:
         try:
@@ -155,7 +174,18 @@ def leggi_df(sql, params=None):
             except Exception:
                 pass
             risorsa["conn"] = get_connection()
+            risorsa["replica"] = False
             return pd.read_sql_query(sql, risorsa["conn"], params=parametri)
+
+@st.cache_data(show_spinner=False, max_entries=20)
+def excel_da_fogli(fogli, titolo=None):
+    """File Excel con un foglio per ogni (nome, tabella); il titolo va in cima al primo foglio.
+    Tenuto in memoria: la pagina non lo ricrea a ogni clic se i dati non sono cambiati."""
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        for i, (nome, df) in enumerate(fogli):
+            backup.scrivi_foglio(writer, nome, df, riga_titolo=titolo if i == 0 else None)
+    return buffer.getvalue()
 
 def get_conto_id(conn, codice):
     """Restituisce l'ID del conto dal Piano dei Conti verificandone l'esistenza."""
@@ -796,7 +826,6 @@ def pagina_soci():
                     st.error(f"⚠️ {ex_csv}")
 
         with st.expander("📥 Importazione Massiva da File Excel (.xlsx)"):
-            buffer = io.BytesIO()
             df_template_demo = pd.DataFrame([{
                 "Cognome_Nome": "Rossi Mario",
                 "Codice_Fiscale": "RSSMRA90A01H501U",
@@ -809,12 +838,9 @@ def pagina_soci():
                 "Scadenza_Certificato": "2027-05-31"
             }])
 
-            with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-                df_template_demo.to_excel(writer, index=False, sheet_name="Tesserati")
-
             st.download_button(
                 label="📄 Scarica File Modello Excel (.xlsx)",
-                data=buffer.getvalue(),
+                data=excel_da_fogli([("Tesserati", df_template_demo)]),
                 file_name="template_tesserati_asd.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
@@ -1162,7 +1188,7 @@ def pagina_soci():
                 st.session_state["flash"] = f"Residenze completate: {completati}." + (
                     f" Da completare a mano ({len(da_vedere)}): " + " · ".join(da_vedere) if da_vedere else "")
                 st.rerun()
-        st.download_button("📥 Scarica il libro soci (.xlsx)", libro_soci.excel(df_libro, NOME_SOCIETA, es_ls, ini_ls, fin_ls),
+        st.download_button("📥 Scarica il libro soci (.xlsx)", excel_da_fogli([("Libro soci", df_libro)], libro_soci.titolo(NOME_SOCIETA, es_ls, ini_ls, fin_ls)),
                            file_name=f"libro_soci_{es_ls.replace('/', '-')}.xlsx",
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
@@ -2142,16 +2168,14 @@ def pagina_lavoro_sportivo():
             t4.metric("Netto pagato", f"€ {df_riep['Netto (€)'].sum():,.2f}")
             t5.metric("INPS a carico società", f"€ {df_riep['INPS a carico società (stima €)'].sum():,.2f}")
             st.dataframe(df_riep, width="stretch", hide_index=True)
-            buf_riep = io.BytesIO()
-            with pd.ExcelWriter(buf_riep, engine="openpyxl") as writer:
-                backup.scrivi_foglio(writer, "Riepilogo", df_riep, riga_titolo=f"Compensi sportivi {NOME_SOCIETA} - anno {anno_r}".replace("  ", " "))
-                df_det = leggi_df(
-                    "SELECT a.denominazione AS Collaboratore, c.data_erogazione AS Data, c.causale AS Causale, c.importo_lordo AS 'Lordo (€)', "
-                    "c.ritenuta_inps AS 'Ritenuta INPS (€)', c.ritenuta_irpef AS 'Ritenuta IRPEF (€)', c.importo_netto AS 'Netto (€)' "
-                    "FROM compensi_sportivi c JOIN collaboratori_sportivi s ON s.id = c.collaboratore_id JOIN anagrafiche a ON a.id = s.anagrafica_id "
-                    "WHERE strftime('%Y', c.data_erogazione) = ? ORDER BY a.denominazione, c.data_erogazione", [anno_r])
-                backup.scrivi_foglio(writer, "Dettaglio compensi", df_det)
-            st.download_button(f"📥 Scarica il riepilogo {anno_r} (.xlsx)", buf_riep.getvalue(), file_name=f"compensi_sportivi_{anno_r}.xlsx",
+            df_det = leggi_df(
+                "SELECT a.denominazione AS Collaboratore, c.data_erogazione AS Data, c.causale AS Causale, c.importo_lordo AS 'Lordo (€)', "
+                "c.ritenuta_inps AS 'Ritenuta INPS (€)', c.ritenuta_irpef AS 'Ritenuta IRPEF (€)', c.importo_netto AS 'Netto (€)' "
+                "FROM compensi_sportivi c JOIN collaboratori_sportivi s ON s.id = c.collaboratore_id JOIN anagrafiche a ON a.id = s.anagrafica_id "
+                "WHERE strftime('%Y', c.data_erogazione) = ? ORDER BY a.denominazione, c.data_erogazione", [anno_r])
+            file_riep = excel_da_fogli([("Riepilogo", df_riep), ("Dettaglio compensi", df_det)],
+                                       f"Compensi sportivi {NOME_SOCIETA} - anno {anno_r}".replace("  ", " "))
+            st.download_button(f"📥 Scarica il riepilogo {anno_r} (.xlsx)", file_riep, file_name=f"compensi_sportivi_{anno_r}.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
     with tab_rimb:
@@ -2763,18 +2787,27 @@ def pagina_backup():
         st.caption("Misura quanto impiega una lettura ad andare e tornare dal database. Sotto i 30 ms l'app è rapida; "
                    "oltre i 100 ms ogni pagina aperta per la prima volta richiede circa un secondo.")
         if st.button("Misura adesso", key="diag_misura"):
-            risorsa = _connessione_letture()
-            tempi = []
-            with risorsa["lock"]:
+            def media_ms(conn):
+                tempi = []
                 for _ in range(5):
                     t0 = time.perf_counter()
-                    risorsa["conn"].execute("SELECT 1").fetchall()
+                    conn.execute("SELECT 1").fetchall()
                     tempi.append((time.perf_counter() - t0) * 1000)
+                return sum(tempi[1:]) / 4
+            risorsa = _connessione_letture(VERSIONE_SCHEMA_DB)
+            with risorsa["lock"]:
+                ms_letture = media_ms(risorsa["conn"])
+            conn_diretta = get_ro_conn()
+            try:
+                ms_diretto = media_ms(conn_diretta)
+            finally:
+                conn_diretta.close()
             url_db = str(_turso_credentials()[0] or "")  # solo l'indirizzo, il token non viene mostrato
             regione = url_db.split(".", 1)[1].split(".turso")[0] if usa_turso() and "." in url_db else "database locale"
-            d1, d2 = st.columns(2)
-            d1.metric("Tempo medio di una lettura", f"{sum(tempi[1:]) / 4:.0f} ms")
-            d2.metric("Regione del database", regione)
+            d1, d2, d3 = st.columns(3)
+            d1.metric("Lettura dati nell'app", f"{ms_letture:.1f} ms", "copia locale" if risorsa["replica"] else "diretta su Turso", delta_color="off")
+            d2.metric("Viaggio fino al database", f"{ms_diretto:.0f} ms", "per salvataggi e controlli", delta_color="off")
+            d3.metric("Regione del database", regione)
     st.caption("I file si preparano al momento leggendo i dati aggiornati dal database. Conservali in un posto sicuro "
                "(per esempio Google Drive): contengono dati personali di soci e tesserati.")
     oggi_txt = datetime.date.today().strftime("%Y-%m-%d")
@@ -2919,11 +2952,9 @@ def pagina_preventivo():
             st.caption(f"Trascorso il {trascorso / durata * 100:.0f}% dell'esercizio: è normale che il consuntivo sia ancora più basso del preventivo.")
         st.dataframe(df_conf, width="stretch", hide_index=True)
         if not df_conf.empty:
-            buf_pv = io.BytesIO()
-            with pd.ExcelWriter(buf_pv, engine="openpyxl") as writer:
-                backup.scrivi_foglio(writer, "Preventivo e consuntivo", df_conf,
-                                     riga_titolo=f"Preventivo e consuntivo {NOME_SOCIETA} - esercizio {es_pv}".replace("  ", " "))
-            st.download_button(f"📥 Scarica preventivo e consuntivo {es_pv} (.xlsx)", buf_pv.getvalue(),
+            file_pv = excel_da_fogli([("Preventivo e consuntivo", df_conf)],
+                                     f"Preventivo e consuntivo {NOME_SOCIETA} - esercizio {es_pv}".replace("  ", " "))
+            st.download_button(f"📥 Scarica preventivo e consuntivo {es_pv} (.xlsx)", file_pv,
                                file_name=f"preventivo_{es_pv.replace('/', '-')}.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
