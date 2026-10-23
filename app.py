@@ -9,6 +9,7 @@ import pandas as pd
 import streamlit as st
 from contextlib import contextmanager
 from modules import backup, distinte, esercizio, lavoro_sportivo, libro_soci, preventivo, quote, rendiconto_pdf, solleciti, tesseramento
+from modules import cap as cap_comuni
 from modules.db import PIANO_DEI_CONTI_ASD, get_connection, init_db, usa_turso
 
 # ---------------------------------------------------------
@@ -243,6 +244,18 @@ def post_journal(conn, data_reg, num_doc, causale, tipo_att, righe):
             [int(mov_id), int(acc_id), str(desc).strip(), float(dare), float(avere)]
         )
     return int(mov_id)
+
+@st.cache_data(ttl=7 * 24 * 3600, show_spinner=False)
+def _scarica_indice_cap():
+    return cap_comuni.indice(cap_comuni.scarica())
+
+def indice_cap():
+    """Elenco CAP/comuni scaricato al bisogno e tenuto in memoria una settimana; None se internet non risponde
+    (in quel caso i dati si inseriscono a mano, senza suggerimenti)."""
+    try:
+        return _scarica_indice_cap()
+    except Exception:
+        return None
 
 def leggi_impostazione(chiave, predefinito=""):
     """Valore salvato nella tabella impostazioni (testi e preferenze dell'app), o il predefinito."""
@@ -893,7 +906,8 @@ def pagina_soci():
             selected_label = st.selectbox("Seleziona Persona da Modificare", list(people_dict.keys()))
             selected_anag_id = int(people_dict[selected_label])
 
-            df_a = leggi_df("SELECT denominazione, codice_fiscale, tipo_documento, numero_documento, telefono, email FROM anagrafiche WHERE id = ?", [selected_anag_id])
+            df_a = leggi_df("SELECT denominazione, codice_fiscale, tipo_documento, numero_documento, telefono, email, indirizzo, cap, comune, provincia "
+                            "FROM anagrafiche WHERE id = ?", [selected_anag_id])
             df_t = leggi_df(
                 "SELECT numero_tessera, numero_scheda_attivita, tipo_tessera, numero_maglia, categoria, ruolo, quota_stagionale, stato, gioca, socio_altra_societa, "
                 "data_tesseramento, data_uscita "
@@ -906,6 +920,10 @@ def pagina_soci():
             cur_num_doc = first_val(df_a, "numero_documento")
             cur_tel = first_val(df_a, "telefono")
             cur_email = first_val(df_a, "email")
+            cur_indirizzo = first_val(df_a, "indirizzo")
+            cur_cap = first_val(df_a, "cap")
+            cur_comune = first_val(df_a, "comune")
+            cur_prov = first_val(df_a, "provincia")
 
             has_tess = not df_t.empty
             cur_matricola = first_val(df_t, "numero_tessera")
@@ -957,6 +975,12 @@ def pagina_soci():
                 c_col1, c_col2 = st.columns(2)
                 e_tel = c_col1.text_input("Telefono (per i solleciti WhatsApp)", value=cur_tel)
                 e_email = c_col2.text_input("Email", value=cur_email)
+                r_col1, r_col2, r_col3, r_col4 = st.columns([3, 1, 2, 1])
+                e_indirizzo = r_col1.text_input("Indirizzo di residenza", value=cur_indirizzo)
+                e_cap = r_col2.text_input("CAP", value=cur_cap, max_chars=5)
+                e_comune = r_col3.text_input("Comune", value=cur_comune)
+                e_prov = r_col4.text_input("Prov.", value=cur_prov, max_chars=2)
+                st.caption("Basta il CAP o il comune: al salvataggio l'altro si completa da solo quando è possibile.")
                 s_col1, s_col2 = st.columns(2)
                 e_ammissione = s_col1.date_input("Data di ammissione a socio", value=cur_ammissione, format="DD/MM/YYYY",
                                                  help="Per il libro soci. Nuove schede: se vuota si usa la data di oggi.")
@@ -999,8 +1023,13 @@ def pagina_soci():
                     if e_ammissione and uscita_salva and uscita_salva < e_ammissione.isoformat():
                         st.error("La data di uscita non può essere precedente alla data di ammissione.")
                         st.stop()
+                    res_cap, res_comune, res_prov, avviso_cap = cap_comuni.completa(
+                        indice_cap() if (str(e_cap).strip() or str(e_comune).strip()) else None, e_cap, e_comune, e_prov)
                     try:
                         with db_write() as w_conn:
+                            w_conn.execute(
+                                "UPDATE anagrafiche SET indirizzo = ?, cap = ?, comune = ?, provincia = ? WHERE id = ?",
+                                [str(e_indirizzo).strip() or None, res_cap or None, res_comune or None, res_prov or None, int(selected_anag_id)])
                             w_conn.execute(
                                 "UPDATE anagrafiche SET denominazione = ?, codice_fiscale = ?, tipo_documento = ?, numero_documento = ?, telefono = ?, email = ? WHERE id = ?",
                                 [str(e_nome).strip(), str(e_cf).strip(), str(e_tipo_doc).strip() or None, str(e_num_doc).strip() or None,
@@ -1039,7 +1068,7 @@ def pagina_soci():
                                         [int(selected_anag_id), str(e_data_ril or ""), str(e_data_scad), str(e_medico).strip()]
                                     )
 
-                        st.session_state["flash"] = f"Scheda di '{e_nome}' aggiornata con successo!"
+                        st.session_state["flash"] = f"Scheda di '{e_nome}' aggiornata con successo!" + (f" ⚠️ {avviso_cap}" if avviso_cap else "")
                         st.rerun()
                     except Exception as ex_edit:
                         st.error(f"Errore durante l'aggiornamento della scheda: {ex_edit}")
@@ -1099,6 +1128,30 @@ def pagina_soci():
         if not senza_uscita.empty:
             st.warning(f"{len(senza_uscita)} soci INATTIVI senza data di uscita non compaiono nel libro: indicala nella loro scheda. "
                        + ", ".join(senza_uscita["denominazione"]))
+        if st.button("📮 Completa CAP e comuni mancanti", key="libro_cap",
+                     help="Per chi ha il comune ma non il CAP (o il contrario). I comuni con più CAP, come le città grandi, vanno completati a mano."):
+            idx_cap = indice_cap()
+            if idx_cap is None:
+                st.error("Elenco dei CAP non raggiungibile in questo momento: riprova più tardi.")
+            else:
+                df_res = leggi_df(
+                    "SELECT a.id, a.denominazione, a.cap, a.comune, a.provincia FROM anagrafiche a JOIN tesserati_calcio t ON t.anagrafica_id = a.id "
+                    "WHERE (COALESCE(a.cap, '') = '' AND COALESCE(a.comune, '') <> '') OR (COALESCE(a.comune, '') = '' AND COALESCE(a.cap, '') <> '') "
+                    "OR (COALESCE(a.provincia, '') = '' AND COALESCE(a.comune, '') <> '')")
+                completati, da_vedere = 0, []
+                with db_write() as w_conn:
+                    for r in df_res.itertuples():
+                        vecchi = tuple("" if v is None or pd.isna(v) else str(v) for v in (r.cap, r.comune, r.provincia))
+                        nuovo_cap, nuovo_comune, nuova_prov, avviso_r = cap_comuni.completa(idx_cap, *vecchi)
+                        if (nuovo_cap, nuovo_comune, nuova_prov) != tuple(v.strip() for v in vecchi):
+                            w_conn.execute("UPDATE anagrafiche SET cap = ?, comune = ?, provincia = ? WHERE id = ?",
+                                           [nuovo_cap or None, nuovo_comune or None, nuova_prov or None, int(r.id)])
+                            completati += 1
+                        if avviso_r:
+                            da_vedere.append(f"{r.denominazione}: {avviso_r}")
+                st.session_state["flash"] = f"Residenze completate: {completati}." + (
+                    f" Da completare a mano ({len(da_vedere)}): " + " · ".join(da_vedere) if da_vedere else "")
+                st.rerun()
         st.download_button("📥 Scarica il libro soci (.xlsx)", libro_soci.excel(df_libro, NOME_SOCIETA, es_ls, ini_ls, fin_ls),
                            file_name=f"libro_soci_{es_ls.replace('/', '-')}.xlsx",
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
