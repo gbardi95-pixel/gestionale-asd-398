@@ -691,14 +691,14 @@ def pagina_soci():
                 socio_altrove = st.checkbox("Socio di un'altra società: qui ha solo la scheda attività", help="Il numero di tessera inserito è quello della scheda attività. Non è socio di questa società: non paga la quota associativa.")
 
                 st.markdown("---")
-                st.write("**Certificato Medico Agonistico** (solo per chi gioca: lascia vuoto se non disponibile)")
+                st.write("**Certificato Medico Agonistico** (solo per chi gioca: lascia vuoto se non disponibile; per chi non gioca viene ignorato)")
                 cm1, cm2, cm3 = st.columns(3)
                 data_ril = cm1.date_input("Data Rilascio Certificato", value=None, format="DD/MM/YYYY")
                 data_scad = cm2.date_input("Data Scadenza Certificato", value=None, format="DD/MM/YYYY")
                 medico = cm3.text_input("Medico Certificatore / Centro")
 
                 if st.form_submit_button("Salva in Anagrafica"):
-                    if data_ril and data_scad and data_scad <= data_ril:
+                    if gioca and data_ril and data_scad and data_scad <= data_ril:
                         st.error("La data di scadenza del certificato deve essere successiva alla data di rilascio.")
                     elif nome:
                         try:
@@ -716,7 +716,7 @@ def pagina_soci():
                                      float(quota), int(gioca), int(socio_altrove)]
                                 )
 
-                                if data_scad:
+                                if gioca and data_scad:
                                     w_conn.execute(
                                         "INSERT INTO certificati_medici (anagrafica_id, tipo, data_rilascio, data_scadenza, medico_certificatore, stato_idoneita) "
                                         "VALUES (?, 'AGONISTICO', ?, ?, ?, 'IDONEO')",
@@ -991,26 +991,33 @@ def pagina_soci():
                 e_socio_altrove = st.checkbox("Socio di un'altra società: qui ha solo la scheda attività", value=cur_socio_altrove, help="Il numero di tessera inserito è quello della scheda attività. Non è socio di questa società: non paga la quota associativa.")
 
                 st.markdown("---")
-                st.write("**Certificato Medico Agonistico** (solo per chi gioca)")
-                m_col1, m_col2, m_col3 = st.columns(3)
+                # Il certificato si chiede solo a chi gioca: per gli altri i campi non compaiono e non vengono controllati
+                e_data_ril = e_data_scad = None
+                e_medico = ""
+                if cur_gioca:
+                    st.write("**Certificato Medico Agonistico**")
+                    m_col1, m_col2, m_col3 = st.columns(3)
 
-                # Nessuna data predefinita: un certificato assente resta assente
-                try:
-                    d_ril = datetime.datetime.strptime(cur_ril, "%Y-%m-%d").date() if cur_ril else None
-                except Exception:
-                    d_ril = None
+                    # Nessuna data predefinita: un certificato assente resta assente
+                    try:
+                        d_ril = datetime.datetime.strptime(cur_ril, "%Y-%m-%d").date() if cur_ril else None
+                    except Exception:
+                        d_ril = None
 
-                try:
-                    d_scad = datetime.datetime.strptime(cur_scad, "%Y-%m-%d").date() if cur_scad else None
-                except Exception:
-                    d_scad = None
+                    try:
+                        d_scad = datetime.datetime.strptime(cur_scad, "%Y-%m-%d").date() if cur_scad else None
+                    except Exception:
+                        d_scad = None
 
-                e_data_ril = m_col1.date_input("Data Rilascio Certificato", value=d_ril, format="DD/MM/YYYY")
-                e_data_scad = m_col2.date_input("Data Scadenza Certificato", value=d_scad, format="DD/MM/YYYY")
-                e_medico = m_col3.text_input("Medico Certificatore", value=cur_medico)
+                    e_data_ril = m_col1.date_input("Data Rilascio Certificato", value=d_ril, format="DD/MM/YYYY")
+                    e_data_scad = m_col2.date_input("Data Scadenza Certificato", value=d_scad, format="DD/MM/YYYY")
+                    e_medico = m_col3.text_input("Medico Certificatore", value=cur_medico)
+                else:
+                    st.caption("🩺 Non gioca: il certificato medico non è richiesto. Se inizia a giocare, spunta «Gioca» e salva: "
+                               "compariranno i campi del certificato.")
 
                 if st.form_submit_button("💾 Salva Modifiche Scheda"):
-                    if e_data_ril and e_data_scad and e_data_scad <= e_data_ril:
+                    if e_gioca and e_data_ril and e_data_scad and e_data_scad <= e_data_ril:
                         st.error("La data di scadenza del certificato deve essere successiva alla data di rilascio.")
                         st.stop()
                     # La data di oggi si mette solo a chi diventa INATTIVO adesso: per chi lo era già non si sa quando è uscito
@@ -1053,7 +1060,7 @@ def pagina_soci():
                                      int(e_gioca), int(e_socio_altrove), uscita_salva]
                                 )
 
-                            if e_data_scad:
+                            if e_gioca and e_data_scad:
                                 if has_cert:
                                     w_conn.execute(
                                         # Solo il certificato più recente: quelli precedenti restano come storico
