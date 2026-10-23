@@ -47,6 +47,34 @@ def componi(modello, nome, quota, arretrati, esercizio, pagamento, societa):
     return re.sub(r" {2,}", " ", testo).strip()
 
 
+TESTO_CERTIFICATO = (
+    "Ciao {nome}, il tuo certificato medico per l'attività sportiva {situazione}. "
+    "Senza certificato valido non puoi allenarti né giocare: portaci quello nuovo appena puoi. Grazie! {societa}"
+)
+SEGNAPOSTO_CERTIFICATO = {
+    "{nome}": "nome della persona",
+    "{situazione}": "«è scaduto il …», «scade il …» oppure «non ci risulta consegnato»",
+    "{societa}": "nome della società",
+}
+
+
+def situazione_certificato(scadenza, oggi):
+    """Frase sullo stato del certificato a partire dalla data di scadenza (AAAA-MM-GG) o dalla sua assenza."""
+    if not scadenza:
+        return "non ci risulta consegnato"
+    data = "/".join(reversed(str(scadenza)[:10].split("-")))
+    return f"è scaduto il {data}" if str(scadenza)[:10] < str(oggi) else f"scade il {data}"
+
+
+def componi_certificato(modello, nome, scadenza, oggi, societa):
+    valori = _Segnaposto(nome=nome, situazione=situazione_certificato(scadenza, oggi), societa=societa or "")
+    try:
+        testo = modello.format_map(valori)
+    except (ValueError, IndexError):
+        testo = modello
+    return re.sub(r" {2,}", " ", testo).strip()
+
+
 def numero_whatsapp(telefono):
     """Numero nel formato internazionale senza «+» richiesto da wa.me; i cellulari italiani senza prefisso ricevono il 39."""
     cifre = re.sub(r"\D", "", str(telefono or ""))

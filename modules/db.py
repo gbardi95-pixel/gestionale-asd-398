@@ -23,6 +23,8 @@ PIANO_DEI_CONTI_ASD = [
     ('20.02', 'Debiti Tributari e Sportivi', 'PASSIVITA', 2),
     ('20.02.001', 'Erario c/IVA 398/91 da Versare', 'PASSIVITA', 3),
     ('20.02.002', 'Debiti v/Collaboratori e Istruttori', 'PASSIVITA', 3),
+    ('20.02.003', 'Erario c/Ritenute IRPEF da Versare', 'PASSIVITA', 3),
+    ('20.02.004', 'INPS c/Contributi da Versare', 'PASSIVITA', 3),
 
     # 30. PATRIMONIO NETTO
     ('30', 'PATRIMONIO NETTO ASD', 'NETTO', 1),
@@ -39,6 +41,7 @@ PIANO_DEI_CONTI_ASD = [
     ('40.01.004', 'Affitto Campi e Strutture Sportive', 'COSTO', 3),
     ('40.01.005', 'Spese Sanitarie e Visite Mediche', 'COSTO', 3),
     ('40.01.006', 'Iscrizione Campionati, Multe e Sanzioni Sportive', 'COSTO', 3),
+    ('40.01.007', 'Contributi INPS a Carico della Società', 'COSTO', 3),
     ('40.02', 'Costi Generali e Amministrativi', 'COSTO', 2),
     ('40.02.001', 'Consulenze Amministrative e Fiscali', 'COSTO', 3),
     ('40.02.002', 'Utenze e Manutenzioni Impianti', 'COSTO', 3),
@@ -499,6 +502,31 @@ def init_db(versione_schema=None):
     );
     """)
 
+    # 19. Convocazioni alle partite e presenze agli allenamenti
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS eventi_squadra (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        tipo TEXT NOT NULL CHECK(tipo IN ('PARTITA', 'ALLENAMENTO')),
+        data TEXT NOT NULL,
+        ora TEXT,
+        categoria TEXT,
+        avversario TEXT,
+        luogo TEXT,
+        ritrovo_ora TEXT,
+        ritrovo_luogo TEXT,
+        note TEXT,
+        creato_il TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+    """)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS presenze_evento (
+        evento_id INTEGER NOT NULL REFERENCES eventi_squadra(id) ON DELETE CASCADE,
+        anagrafica_id INTEGER NOT NULL REFERENCES anagrafiche(id),
+        stato TEXT NOT NULL CHECK(stato IN ('CONVOCATO', 'PRESENTE', 'ASSENTE', 'GIUSTIFICATO')),
+        PRIMARY KEY (evento_id, anagrafica_id)
+    );
+    """)
+
     # Migrazione: socio di un'altra società, qui tesserato solo con la scheda attività
     try:
         cursor.execute("ALTER TABLE tesserati_calcio ADD COLUMN socio_altra_societa INTEGER NOT NULL DEFAULT 0;")
@@ -521,6 +549,16 @@ def init_db(versione_schema=None):
         "ALTER TABLE tesserati_calcio ADD COLUMN data_uscita TEXT;",
         # Lavoro sportivo: collaboratore già iscritto ad altra previdenza obbligatoria o pensionato (aliquota INPS diversa)
         "ALTER TABLE collaboratori_sportivi ADD COLUMN altra_previdenza INTEGER NOT NULL DEFAULT 0;",
+        # Ricevuta: chi ha pagato, se diverso da chi pratica lo sport (es. il genitore, per la detrazione)
+        "ALTER TABLE ricevute_istituzionali ADD COLUMN versante_nome TEXT;",
+        "ALTER TABLE ricevute_istituzionali ADD COLUMN versante_cf TEXT;",
+        # Registro spese: come è stata pagata e collegamento alle registrazioni di prima nota (acquisto e pagamento)
+        "ALTER TABLE fatture_passive ADD COLUMN modalita_pagamento TEXT;",
+        "ALTER TABLE fatture_passive ADD COLUMN data_pagamento TEXT;",
+        "ALTER TABLE fatture_passive ADD COLUMN movimento_id INTEGER;",
+        "ALTER TABLE fatture_passive ADD COLUMN movimento_pagamento_id INTEGER;",
+        # Compensi: registrazione di prima nota collegata
+        "ALTER TABLE compensi_sportivi ADD COLUMN movimento_id INTEGER;",
     ):
         try:
             cursor.execute(alter_sql)

@@ -5,11 +5,12 @@ import io
 import os
 import threading
 import time
+import urllib.parse
 import warnings
 import pandas as pd
 import streamlit as st
 from contextlib import contextmanager
-from modules import backup, distinte, esercizio, lavoro_sportivo, libro_soci, preventivo, quote, rendiconto_pdf, solleciti, tesseramento
+from modules import backup, distinte, esercizio, lavoro_sportivo, libro_soci, preventivo, quote, rendiconto_pdf, ricevuta_pdf, solleciti, squadra, tesseramento
 from modules import cap as cap_comuni
 from modules.db import PIANO_DEI_CONTI_ASD, _turso_credentials, connessione_replica, get_connection, init_db, usa_turso, versione_schema_db
 
@@ -18,7 +19,7 @@ from modules.db import PIANO_DEI_CONTI_ASD, _turso_credentials, connessione_repl
 # ---------------------------------------------------------
 # Incrementare a ogni modifica dello schema del DB: forza init_db() (e le migrazioni)
 # anche quando Streamlit Cloud aggiorna il codice senza riavviare il server.
-VERSIONE_SCHEMA_DB = 11
+VERSIONE_SCHEMA_DB = 12
 
 @st.cache_resource(show_spinner="Avvio dell'app…")
 def _setup_database(versione_schema):
@@ -300,6 +301,36 @@ def salva_impostazioni(w_conn, valori):
         w_conn.execute("INSERT INTO impostazioni (chiave, valore) VALUES (?, ?) ON CONFLICT(chiave) DO UPDATE SET valore = excluded.valore",
                        [chiave, str(valore)])
 
+CAMPI_SOCIETA = {
+    "societa_denominazione": "Denominazione",
+    "societa_sede": "Sede legale (indirizzo, CAP, comune)",
+    "societa_cf": "Codice fiscale",
+    "societa_piva": "Partita IVA (se c'è)",
+    "societa_attivita": "Attività sportiva (es. Calcio)",
+}
+
+def dati_societa():
+    """Dati dell'associazione per ricevute e documenti, salvati nelle impostazioni (la denominazione ripiega su NOME_SOCIETA)."""
+    dati = {chiave.replace("societa_", ""): leggi_impostazione(chiave, "") for chiave in CAMPI_SOCIETA}
+    dati["denominazione"] = dati["denominazione"] or NOME_SOCIETA
+    dati["codice_fiscale"], dati["partita_iva"] = dati.pop("cf"), dati.pop("piva")
+    return dati
+
+@st.cache_data(show_spinner=False, max_entries=50)
+def pdf_ricevuta(ricevuta_id, societa_tuple):
+    """PDF di una ricevuta registrata (tenuto in memoria finché i dati non cambiano)."""
+    r = leggi_df(
+        "SELECT r.*, a.denominazione, a.codice_fiscale FROM ricevute_istituzionali r JOIN anagrafiche a ON a.id = r.anagrafica_id WHERE r.id = ?",
+        [int(ricevuta_id)]).iloc[0]
+    testo = lambda v: "" if v is None or pd.isna(v) else str(v).strip()
+    data = pd.to_datetime(r["data_emissione"], errors="coerce")
+    return ricevuta_pdf.genera(dict(societa_tuple), {
+        "numero": testo(r["numero_ricevuta"]), "data": data.strftime("%d/%m/%Y") if pd.notna(data) else testo(r["data_emissione"]),
+        "praticante": testo(r["denominazione"]), "praticante_cf": testo(r["codice_fiscale"]),
+        "versante": testo(r.get("versante_nome")), "versante_cf": testo(r.get("versante_cf")),
+        "causale": testo(r["causale"]), "importo": float(r["importo"]), "pagamento": testo(r["modalita_pagamento"]) or "da completare",
+        "bollo": float(r["marca_da_bollo"] or 0)})
+
 def mese_inizio_esercizio():
     """Mese di inizio dell'esercizio sociale (1 = anno solare, 7 = stagione sportiva 1/7-30/6), impostabile dall'app."""
     df = leggi_df("SELECT valore FROM impostazioni WHERE chiave = 'mese_inizio_esercizio'")
@@ -563,7 +594,7 @@ def pagina_dashboard():
     df_cert_alert = leggi_df(
         """
         SELECT a.denominazione as 'Tesserato', t.categoria as Categoria, t.ruolo as Ruolo,
-               c.tipo as Tipo, c.data_scadenza as 'Scadenza', c.stato_idoneita as Idoneità
+               c.tipo as Tipo, c.data_scadenza as 'Scadenza', c.stato_idoneita as Idoneità, a.telefono, a.email
         FROM tesserati_calcio t
         JOIN anagrafiche a ON t.anagrafica_id = a.id
         LEFT JOIN (
@@ -615,7 +646,35 @@ def pagina_dashboard():
                 st.error(f"⛔ **{r['Tesserato']}** - CERTIFICATO SCADUTO IL {r['Scadenza']} (Non schierabile in gara)")
             else:
                 st.warning(f"⚠️ **{r['Tesserato']}** - Certificato in scadenza il {r['Scadenza']}")
-        st.dataframe(df_cert_alert, width="stretch")
+        st.dataframe(df_cert_alert.drop(columns=["telefono", "email"]), width="stretch", hide_index=True)
+        with st.expander(f"📣 Avvisi da inviare ({len(df_cert_alert)}): messaggio pronto per WhatsApp o email"):
+            modello_cert = leggi_impostazione("testo_avviso_certificato", solleciti.TESTO_CERTIFICATO)
+            with st.form("form_testo_certificato"):
+                nuovo_modello_cert = st.text_area("Testo del messaggio", value=modello_cert, height=100)
+                st.caption("Parole tra graffe sostituite in automatico: " +
+                           "; ".join(f"{k} = {v}" for k, v in solleciti.SEGNAPOSTO_CERTIFICATO.items()))
+                if st.form_submit_button("💾 Salva il testo"):
+                    with db_write() as w_conn:
+                        salva_impostazioni(w_conn, {"testo_avviso_certificato": nuovo_modello_cert.strip() or solleciti.TESTO_CERTIFICATO})
+                    st.session_state["flash"] = "Testo degli avvisi sui certificati salvato."
+                    st.rerun()
+            for _, r in df_cert_alert.iterrows():
+                scad_r = r["Scadenza"] if pd.notna(r["Scadenza"]) and r["Scadenza"] else ""
+                testo_cert = solleciti.componi_certificato(modello_cert, r["Tesserato"], scad_r, today, NOME_SOCIETA)
+                with st.container(border=True):
+                    st.markdown(f"**{r['Tesserato']}** – {solleciti.situazione_certificato(scad_r, today)}")
+                    st.code(testo_cert, language=None, wrap_lines=True)
+                    w1, w2, _ = st.columns([1, 1, 2])
+                    link_wa = solleciti.link_whatsapp(r["telefono"] if pd.notna(r["telefono"]) else "", testo_cert)
+                    link_mail = solleciti.link_email(r["email"] if pd.notna(r["email"]) else "", "Certificato medico sportivo", testo_cert)
+                    if link_wa:
+                        w1.link_button("💬 WhatsApp", link_wa)
+                    else:
+                        w1.caption("Telefono mancante")
+                    if link_mail:
+                        w2.link_button("✉️ Email", link_mail)
+                    else:
+                        w2.caption("Email mancante")
     else:
         st.success("✅ Tutti i tesserati che giocano risultano con certificato medico in corso di validità.")
 
@@ -637,12 +696,12 @@ def pagina_soci():
     with tab_list:
         filtro_cat = st.selectbox("Filtra per Categoria / Inquadramento", ["TUTTI"] + CATEGORIE_LISTA)
         query_anag = """
-            SELECT a.denominazione as Nome, 
-                   t.categoria as Categoria, 
-                   t.ruolo as Ruolo, 
+            SELECT a.denominazione as Nome,
+                   t.categoria as Categoria,
+                   t.ruolo as Ruolo,
                    a.codice_fiscale as 'Codice Fiscale',
-                   t.numero_tessera as 'Matricola/Tessera N°', 
-                   t.numero_scheda_attivita as 'N° Scheda Attività', 
+                   t.numero_tessera as 'Matricola/Tessera N°',
+                   t.numero_scheda_attivita as 'N° Scheda Attività',
                    t.tipo_tessera as 'Tipo Tessera',
                    t.numero_maglia as 'Maglia',
                    a.tipo_documento as 'Documento',
@@ -1727,6 +1786,18 @@ def pagina_distinte():
 def pagina_ricevute():
     st.subheader("📜 Emissione Ricevute Istituzionali / Quote Associative")
 
+    societa_ric = dati_societa()
+    mancanti_soc = [CAMPI_SOCIETA["societa_" + k] for k in ("sede", "cf") if not societa_ric.get({"cf": "codice_fiscale"}.get(k, k))]
+    with st.expander("🏛️ Dati dell'associazione stampati sulle ricevute" + (" ⚠️ da completare" if mancanti_soc else "")):
+        with st.form("dati_societa"):
+            nuovi_soc = {chiave: st.text_input(etichetta, value=leggi_impostazione(chiave, NOME_SOCIETA if chiave == "societa_denominazione" else ""))
+                         for chiave, etichetta in CAMPI_SOCIETA.items()}
+            if st.form_submit_button("💾 Salva i dati dell'associazione"):
+                with db_write() as w_conn:
+                    salva_impostazioni(w_conn, {k: v.strip() for k, v in nuovi_soc.items()})
+                st.session_state["flash"] = "Dati dell'associazione salvati."
+                st.rerun()
+
     with st.expander("➕ Aggiungi Nuovo Socio / Persona Fisica in Anagrafica"):
         with st.form("nuovo_socio_fast", clear_on_submit=True):
             s_nome = st.text_input("Cognome e Nome / Ragione Sociale*")
@@ -1767,7 +1838,12 @@ def pagina_ricevute():
             causale_custom = c5.text_input("Dettaglio / Anno Sociale", value=f"Anno {anno_ric}")
             importo = c6.number_input("Importo Incassato (€)", min_value=0.01, step=10.0)
 
-            pagamento = st.selectbox("Modalità Pagamento", ["BONIFICO", "POS", "PAYPAL", "CONTANTI"])
+            pagamento = st.selectbox("Modalità Pagamento", ["BONIFICO", "POS", "PAYPAL", "CONTANTI"],
+                                     help="Per la detrazione delle spese sportive dei ragazzi serve un pagamento tracciabile (non contanti).")
+            v1, v2 = st.columns(2)
+            versante_nome = v1.text_input("Pagato da (solo se diverso, es. il genitore)",
+                                          help="Per la detrazione delle spese sportive dei figli la ricevuta deve indicare chi ha pagato.")
+            versante_cf = v2.text_input("Codice fiscale di chi ha pagato")
             pregresso = st.checkbox(
                 "Incasso di una quota degli esercizi precedenti (già inserita tra i crediti di apertura)",
                 help="La ricevuta riduce il credito verso il socio invece di registrare un nuovo ricavo, che è già stato contato nell'esercizio in cui la quota era dovuta.")
@@ -1800,10 +1876,10 @@ def pagina_ricevute():
 
                         with db_write() as w_conn:
                             w_conn.execute(
-                                "INSERT INTO ricevute_istituzionali (numero_ricevuta, data_emissione, anagrafica_id, causale, importo, modalita_pagamento, marca_da_bollo, credito_pregresso) "
-                                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                                "INSERT INTO ricevute_istituzionali (numero_ricevuta, data_emissione, anagrafica_id, causale, importo, modalita_pagamento, marca_da_bollo, "
+                                "credito_pregresso, versante_nome, versante_cf) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                                 [str(num_ric).strip(), str(data_ric), int(soci_dict[socio_sel]), str(causale_completa).strip(), float(importo), str(pagamento),
-                                 float(bollo), int(pregresso)]
+                                 float(bollo), int(pregresso), versante_nome.strip() or None, versante_cf.strip().upper() or None]
                             )
 
                             righe_journal = [
@@ -1812,7 +1888,7 @@ def pagina_ricevute():
                             ]
                             post_journal(w_conn, data_ric, num_ric, f"Incasso {tipo_causale} - {socio_sel}", "ISTITUZIONALE", righe_journal)
 
-                        st.session_state["flash"] = f"Ricevuta N. {num_ric} emessa e contabilizzata con successo!"
+                        st.session_state["flash"] = f"Ricevuta N. {num_ric} emessa e contabilizzata con successo! Il PDF si scarica dal registro qui sotto."
                         st.rerun()
                     except Exception as ex_ric:
                         st.error(f"Errore durante l'emissione della ricevuta: {ex_ric}")
@@ -1841,13 +1917,24 @@ def pagina_ricevute():
     st.markdown("### 📖 Registro Ricevute Istituzionali Emesse")
     df_ric = leggi_df(
         """
-        SELECT r.numero_ricevuta as 'N. Ricevuta', r.data_emissione as Data, a.denominazione as Socio, 
-               r.causale as Causale, r.importo as 'Importo (€)', r.modalita_pagamento as Pagamento, r.marca_da_bollo as 'Bollo (€)'
+        SELECT r.id, r.numero_ricevuta as 'N. Ricevuta', r.data_emissione as Data, a.denominazione as Socio,
+               r.versante_nome as 'Pagato da', r.causale as Causale, r.importo as 'Importo (€)', r.modalita_pagamento as Pagamento,
+               r.marca_da_bollo as 'Bollo (€)'
         FROM ricevute_istituzionali r
         JOIN anagrafiche a ON r.anagrafica_id = a.id
         ORDER BY r.id DESC
         """)
-    st.dataframe(df_ric, width="stretch")
+    st.dataframe(df_ric.drop(columns=["id"]), width="stretch", hide_index=True)
+    if not df_ric.empty:
+        etichette_ric = {f"N. {r['N. Ricevuta']} · {r['Socio']} · € {float(r['Importo (€)']):,.2f}": int(r["id"]) for _, r in df_ric.iterrows()}
+        p1, p2 = st.columns([3, 1])
+        scelta_ric = p1.selectbox("Ricevuta da stampare o inviare", list(etichette_ric), key="ric_pdf_sel")
+        if mancanti_soc:
+            p1.caption("⚠️ Completa i dati dell'associazione (in alto) prima di consegnare le ricevute: " + ", ".join(mancanti_soc) + ".")
+        id_ric = etichette_ric[scelta_ric]
+        p2.download_button("📄 Scarica PDF", pdf_ricevuta(id_ric, tuple(sorted(societa_ric.items()))),
+                           file_name=f"ricevuta_{df_ric.loc[df_ric['id'] == id_ric, 'N. Ricevuta'].iloc[0].replace('/', '-')}.pdf",
+                           mime="application/pdf", key="ric_pdf_btn")
 
 # ---------------------------------------------------------
 # 4. SPONSOR & PUBBLICITÀ (REGIME LEGGE 398/91)
@@ -1972,7 +2059,7 @@ def pagina_sponsor():
     st.markdown("### 📖 Registro Cronologico Sponsorizzazioni (D.M. 11/02/1997)")
     df_reg398 = leggi_df(
         """
-        SELECT f.numero_fattura as N_Doc, f.data_fattura as Data, s.denominazione as Sponsor, 
+        SELECT f.numero_fattura as N_Doc, f.data_fattura as Data, s.denominazione as Sponsor,
                f.imponibile as 'Imponibile (€)', f.iva_totale as 'IVA 22% (€)', f.totale_fattura as 'Totale (€)',
                f.iva_da_versare_50 as 'IVA 50% Erario (€)', f.stima_ires_3 as 'Stima IRES 24% su 3% (€)'
         FROM fatture_sponsor_398 f
@@ -1984,6 +2071,8 @@ def pagina_sponsor():
 # ---------------------------------------------------------
 # 5. LAVORO SPORTIVO & RIMBORSI (D.LGS. 36/2021)
 # ---------------------------------------------------------
+CONTI_PAGAMENTO_COMPENSI = {"BONIFICO": "10.01.001", "PAYPAL": "10.01.003", "CONTANTI": "10.01.002"}
+
 def pagina_lavoro_sportivo():
     st.subheader("⚽ Gestione Staff Tecnico, Compensi Sportivi e Trasferte Campionato")
 
@@ -2095,6 +2184,8 @@ def pagina_lavoro_sportivo():
                 anno_erog = str(data_erog.year)
                 causale_c = c2.text_input("Causale", value="Compenso attività sportiva allenatore Mese")
                 importo_lordo = c3.number_input("Importo Lordo (€)", min_value=0.01, step=50.0)
+                pagato_con = st.selectbox("Netto pagato con", list(CONTI_PAGAMENTO_COMPENSI),
+                                          help="Il compenso viene registrato anche in prima nota: costo lordo, netto pagato e ritenute da versare.")
 
                 if st.form_submit_button("Eroga Compenso e Calcola Franchigie"):
                     coll_sel = staff_righe[int(staff_dict[staff_sel])] if staff_sel else None
@@ -2120,10 +2211,21 @@ def pagina_lavoro_sportivo():
                             rit_inps, rit_irpef, importo_netto, new_prog = stima["ritenuta_inps"], stima["ritenuta_irpef"], stima["netto"], stima["progressivo"]
 
                             with db_write() as w_conn:
+                                # Prima nota: costo lordo (e quota INPS della società) contro netto pagato e ritenute da versare
+                                righe_comp = [(get_conto_id(w_conn, "40.01.001"), "Compenso lordo", float(importo_lordo), 0.0)]
+                                if stima["inps_societa"] > 0:
+                                    righe_comp.append((get_conto_id(w_conn, "40.01.007"), "Contributi INPS a carico della società (stima)", float(stima["inps_societa"]), 0.0))
+                                righe_comp.append((get_conto_id(w_conn, CONTI_PAGAMENTO_COMPENSI[pagato_con]), "Netto pagato", 0.0, float(importo_netto)))
+                                if rit_irpef > 0:
+                                    righe_comp.append((get_conto_id(w_conn, "20.02.003"), "Ritenuta IRPEF da versare", 0.0, float(rit_irpef)))
+                                if stima["contributo_inps"] > 0:
+                                    righe_comp.append((get_conto_id(w_conn, "20.02.004"), "Contributi INPS da versare", 0.0, float(stima["contributo_inps"])))
+                                coll_nome = staff_sel.split(" (")[0]
+                                mov_comp = post_journal(w_conn, data_erog, f"Compenso {anno_erog}", f"{str(causale_c).strip()} - {coll_nome}", "ISTITUZIONALE", righe_comp)
                                 w_conn.execute(
-                                    "INSERT INTO compensi_sportivi (collaboratore_id, data_erogazione, causale, importo_lordo, progressivo_inps_anno, progressivo_irpef_anno, ritenuta_inps, ritenuta_irpef, importo_netto) "
-                                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                                    [coll_id, str(data_erog), str(causale_c).strip(), float(importo_lordo), float(new_prog), float(new_prog), float(rit_inps), float(rit_irpef), float(importo_netto)]
+                                    "INSERT INTO compensi_sportivi (collaboratore_id, data_erogazione, causale, importo_lordo, progressivo_inps_anno, progressivo_irpef_anno, ritenuta_inps, ritenuta_irpef, importo_netto, movimento_id) "
+                                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                    [coll_id, str(data_erog), str(causale_c).strip(), float(importo_lordo), float(new_prog), float(new_prog), float(rit_inps), float(rit_irpef), float(importo_netto), mov_comp]
                                 )
 
                             st.session_state["flash"] = (f"Compenso erogato! Netto a pagare: € {importo_netto:.2f}, INPS a carico della società (stima): "
@@ -2140,6 +2242,38 @@ def pagina_lavoro_sportivo():
             if not df_ultimi.empty:
                 st.markdown("**Ultimi compensi registrati**")
                 st.dataframe(df_ultimi, width="stretch", hide_index=True)
+
+            # Ritenute e contributi trattenuti o dovuti, da versare con F24
+            saldi_rit = saldi_conti_prima_del(datetime.date.today() + datetime.timedelta(days=1))
+            da_versare_irpef = round(-saldi_rit.get("20.02.003", 0.0), 2) + 0.0  # + 0.0 evita «-0,00»
+            da_versare_inps = round(-saldi_rit.get("20.02.004", 0.0), 2) + 0.0
+            with st.expander(f"🏦 Ritenute e contributi da versare (F24): IRPEF € {da_versare_irpef:,.2f} · INPS € {da_versare_inps:,.2f}"):
+                st.caption("Importi accumulati dai compensi registrati e non ancora versati. Il versamento si fa con F24 (di norma entro il 16 del mese "
+                           "successivo al pagamento): i codici tributo e le scadenze vanno confermati con il consulente del lavoro.")
+                with st.form("versamento_f24", clear_on_submit=True):
+                    w1, w2, w3, w4 = st.columns(4)
+                    data_f24 = w1.date_input("Data versamento", format="DD/MM/YYYY")
+                    vers_irpef = w2.number_input("IRPEF versata (€)", min_value=0.0, step=10.0, value=max(da_versare_irpef, 0.0))
+                    vers_inps = w3.number_input("INPS versata (€)", min_value=0.0, step=10.0, value=max(da_versare_inps, 0.0))
+                    conto_f24 = w4.selectbox("Pagato con", ["BONIFICO", "PAYPAL", "CONTANTI"])
+                    if st.form_submit_button("Registra il versamento"):
+                        tot_f24 = round(vers_irpef + vers_inps, 2)
+                        if tot_f24 <= 0:
+                            st.error("Indica almeno un importo versato.")
+                        else:
+                            try:
+                                with db_write() as w_conn:
+                                    righe_f24 = []
+                                    if vers_irpef > 0:
+                                        righe_f24.append((get_conto_id(w_conn, "20.02.003"), "Versamento ritenute IRPEF", float(vers_irpef), 0.0))
+                                    if vers_inps > 0:
+                                        righe_f24.append((get_conto_id(w_conn, "20.02.004"), "Versamento contributi INPS", float(vers_inps), 0.0))
+                                    righe_f24.append((get_conto_id(w_conn, CONTI_PAGAMENTO_COMPENSI[conto_f24]), "Pagamento F24", 0.0, tot_f24))
+                                    post_journal(w_conn, data_f24, "F24", "Versamento ritenute e contributi collaboratori sportivi", "ISTITUZIONALE", righe_f24)
+                                st.session_state["flash"] = f"Versamento F24 di € {tot_f24:,.2f} registrato in prima nota."
+                                st.rerun()
+                            except Exception as ex_f24:
+                                st.error(f"Errore nella registrazione del versamento: {ex_f24}")
         else:
             st.warning("Registra prima un collaboratore nella scheda «👥 Collaboratori».")
 
@@ -2445,9 +2579,12 @@ def pagina_prima_nota():
                     collegamenti = leggi_df(
                         "SELECT 'apertura' AS tipo, esercizio AS rif FROM aperture_esercizio WHERE movimento_id = ? "
                         "UNION ALL SELECT 'incasso_sponsor', CAST(id AS TEXT) FROM incassi_sponsor WHERE movimento_id = ? "
+                        "UNION ALL SELECT 'spesa', CAST(id AS TEXT) FROM fatture_passive WHERE movimento_id = ? "
+                        "UNION ALL SELECT 'compenso', CAST(id AS TEXT) FROM compensi_sportivi WHERE movimento_id = ? "
+                        "UNION ALL SELECT 'pagamento_spesa', CAST(id AS TEXT) FROM fatture_passive WHERE movimento_pagamento_id = ? "
                         "UNION ALL SELECT 'ricevuta', numero_ricevuta FROM ricevute_istituzionali WHERE numero_ricevuta = ? AND data_emissione = ? "
                         "UNION ALL SELECT 'fattura', numero_fattura FROM fatture_sponsor_398 WHERE numero_fattura = ? AND data_fattura = ?",
-                        [mov_sel, mov_sel, str(testata["numero_documento"]), str(testata["data_registrazione"]),
+                        [mov_sel, mov_sel, mov_sel, mov_sel, mov_sel, str(testata["numero_documento"]), str(testata["data_registrazione"]),
                          str(testata["numero_documento"]), str(testata["data_registrazione"])])
                     tipi_coll = set(collegamenti["tipo"])
                     if "apertura" in tipi_coll:
@@ -2456,6 +2593,12 @@ def pagina_prima_nota():
                         if "ricevuta" in tipi_coll or "fattura" in tipi_coll:
                             st.warning("Questa registrazione è nata da una ricevuta o da una fattura: qui cambi solo la contabilità, "
                                        "il documento resta com'è. Se l'errore è nel documento, correggi anche quello.")
+                        if "compenso" in tipi_coll:
+                            st.warning("Questa registrazione è collegata a un compenso: se la modifichi, il compenso e il riepilogo annuale non cambiano; "
+                                       "se la elimini, viene eliminato anche il compenso.")
+                        if "spesa" in tipi_coll or "pagamento_spesa" in tipi_coll:
+                            st.warning("Questa registrazione è collegata al registro spese: se la modifichi, l'importo nel registro non cambia; "
+                                       "se la elimini, viene eliminata la spesa (o, per un pagamento, la spesa torna «da pagare»).")
                         if "incasso_sponsor" in tipi_coll:
                             st.warning("Questa registrazione è collegata a un incasso da sponsor: se la modifichi, l'importo dell'incasso nella pagina Sponsor "
                                        "non cambia; se la elimini, viene eliminato anche l'incasso.")
@@ -2520,6 +2663,12 @@ def pagina_prima_nota():
                             try:
                                 with db_write() as w_conn:
                                     w_conn.execute("DELETE FROM incassi_sponsor WHERE movimento_id = ?", [int(mov_sel)])
+                                    # Spesa: se si elimina l'acquisto si elimina la spesa (e l'eventuale pagamento collegato resta da sistemare a mano);
+                                    # se si elimina il pagamento la spesa torna da pagare
+                                    w_conn.execute("UPDATE fatture_passive SET data_pagamento = NULL, modalita_pagamento = NULL, movimento_pagamento_id = NULL "
+                                                   "WHERE movimento_pagamento_id = ? AND movimento_id <> ?", [int(mov_sel), int(mov_sel)])
+                                    w_conn.execute("DELETE FROM fatture_passive WHERE movimento_id = ?", [int(mov_sel)])
+                                    w_conn.execute("DELETE FROM compensi_sportivi WHERE movimento_id = ?", [int(mov_sel)])
                                     w_conn.execute("DELETE FROM righe_prima_nota WHERE movimento_id = ?", [int(mov_sel)])
                                     w_conn.execute("DELETE FROM movimenti_prima_nota WHERE id = ?", [int(mov_sel)])
                                 st.session_state["flash"] = f"Registrazione N° {mov_sel} eliminata" + (
@@ -2531,8 +2680,8 @@ def pagina_prima_nota():
         st.divider()
         df_pn = leggi_df(
             """
-            SELECT m.id as 'N° reg.', m.data_registrazione as Data, m.numero_documento as Doc, m.causale as Causale, 
-                   m.tipo_attivita as Attività, p.codice || ' - ' || p.nome as Sottoconto, 
+            SELECT m.id as 'N° reg.', m.data_registrazione as Data, m.numero_documento as Doc, m.causale as Causale,
+                   m.tipo_attivita as Attività, p.codice || ' - ' || p.nome as Sottoconto,
                    r.dare as 'Dare (€)', r.avere as 'Avere (€)'
             FROM righe_prima_nota r
             JOIN movimenti_prima_nota m ON r.movimento_id = m.id
@@ -2781,6 +2930,23 @@ def pagina_piano_conti():
     st.dataframe(df_pdc, width="stretch")
 
 
+GIORNI_PROMEMORIA_BACKUP = 7
+
+def registra_backup():
+    """Al download della copia completa si salva la data, da cui parte il promemoria settimanale."""
+    try:
+        with db_write() as w_conn:
+            salva_impostazioni(w_conn, {"ultimo_backup": datetime.date.today().isoformat()})
+    except Exception:
+        pass  # il download non deve fallire se la data non si salva
+
+def giorni_da_ultimo_backup():
+    """Giorni passati dall'ultima copia completa scaricata, None se non ne è mai stata scaricata una."""
+    try:
+        return (datetime.date.today() - datetime.date.fromisoformat(leggi_impostazione("ultimo_backup"))).days
+    except ValueError:
+        return None
+
 def pagina_backup():
     st.subheader("💾 Backup ed esportazioni in Excel")
     with st.expander("⏱️ Diagnostica velocità del database"):
@@ -2828,8 +2994,12 @@ def pagina_backup():
             st.error(f"Errore nella preparazione della copia: {ex_bk}")
     if "bk_completo_file" in st.session_state:
         file_bk, conteggi_bk = st.session_state["bk_completo_file"]
-        st.download_button("📥 Scarica la copia completa (.xlsx)", file_bk, file_name=f"backup_gestionale_{oggi_txt}.xlsx", mime=MIME_XLSX)
+        st.download_button("📥 Scarica la copia completa (.xlsx)", file_bk, file_name=f"backup_gestionale_{oggi_txt}.xlsx", mime=MIME_XLSX,
+                           on_click=registra_backup)
         st.caption(f"{len(conteggi_bk)} tabelle, {sum(c['Righe'] for c in conteggi_bk)} righe in tutto.")
+    ultimo_bk = leggi_impostazione("ultimo_backup")
+    st.caption(f"Ultima copia completa scaricata: {'/'.join(reversed(ultimo_bk.split('-'))) if ultimo_bk else 'mai'}. "
+               f"L'app ricorda di farne una ogni {GIORNI_PROMEMORIA_BACKUP} giorni.")
 
     st.markdown("---")
     st.markdown("#### 📊 Esportazione dell'esercizio per il commercialista")
@@ -2858,6 +3028,62 @@ def pagina_backup():
         st.download_button(f"📥 Scarica l'esercizio {es_bk} (.xlsx)", file_es,
                            file_name=f"esercizio_{es_bk.replace('/', '-')}_{oggi_txt}.xlsx", mime=MIME_XLSX)
         st.dataframe(pd.DataFrame(conteggi_es), hide_index=True)
+
+    st.markdown("---")
+    st.markdown("#### ♻️ Ripristino da una copia completa")
+    st.warning("Il ripristino **sostituisce tutti i dati** dell'app con quelli della copia (il modello Word delle distinte resta com'è). "
+               "Usalo solo per recuperare dati persi o rovinati. Prima di procedere l'app prepara una copia dei dati attuali da scaricare.")
+    file_rip = st.file_uploader("Copia completa da ripristinare (file .xlsx scaricato da questa pagina)", type=["xlsx"], key="rip_file")
+    if file_rip is not None:
+        try:
+            versione_rip, tabelle_rip = backup.leggi_copia(file_rip.getvalue())
+        except ValueError as ex_rip:
+            st.error(str(ex_rip))
+            versione_rip, tabelle_rip = None, {}
+        if versione_rip is not None and versione_rip > VERSIONE_SCHEMA_DB:
+            st.error(f"La copia viene da una versione più nuova dell'app (schema {versione_rip}, questa è {VERSIONE_SCHEMA_DB}): aggiorna prima l'app.")
+        elif tabelle_rip:
+            conn_rip = get_ro_conn()
+            try:
+                attuali_rip = {t: conn_rip.execute(f'SELECT COUNT(*) FROM "{t}"').fetchone()[0] for t in backup.elenco_tabelle(conn_rip)}
+            finally:
+                conn_rip.close()
+            confronto_rip = pd.DataFrame([{"Tabella": t, "Righe nella copia": len(tabelle_rip[t][1]) if t in tabelle_rip else "—",
+                                            "Righe attuali": n} for t, n in sorted(attuali_rip.items())])
+            st.dataframe(confronto_rip, width="stretch", hide_index=True)
+            if versione_rip < VERSIONE_SCHEMA_DB:
+                st.caption(f"La copia è di una versione precedente (schema {versione_rip}): le colonne aggiunte dopo resteranno vuote.")
+            conferma_rip = st.text_input("Per confermare scrivi RIPRISTINA", key="rip_conferma")
+            if st.button("♻️ Ripristina i dati dalla copia", type="primary", disabled=conferma_rip.strip().upper() != "RIPRISTINA", key="rip_esegui"):
+                conn_rip = get_connection()
+                try:
+                    with st.spinner("Copia dei dati attuali e ripristino…"):
+                        st.session_state["rip_copia_prima"] = backup.backup_completo(conn_rip, VERSIONE_SCHEMA_DB)[0]
+                        script_rip, attese_rip = backup.script_ripristino(conn_rip, tabelle_rip)
+                        try:
+                            conn_rip.executescript(script_rip)
+                        except Exception:
+                            try:
+                                conn_rip.rollback()
+                            except Exception:
+                                pass
+                            raise
+                        # Turso non sempre segnala l'errore di uno script: si controlla che ogni tabella abbia le righe attese
+                        diverse = [t for t, n in attese_rip.items() if conn_rip.execute(f'SELECT COUNT(*) FROM "{t}"').fetchone()[0] != n]
+                    if diverse:
+                        st.error("Il ripristino non è andato a buon fine (tabelle non coerenti: " + ", ".join(diverse) + "). "
+                                 "Se i dati risultano cambiati, ripristina la copia dei dati di prima qui sotto.")
+                    else:
+                        st.success(f"Ripristino completato: {sum(attese_rip.values())} righe in {len(attese_rip)} tabelle.")
+                except Exception as ex_rip:
+                    st.error(f"Ripristino non eseguito, i dati non sono stati modificati. Dettaglio: {ex_rip}")
+                finally:
+                    conn_rip.close()
+                    sincronizza_letture()
+                    st.cache_data.clear()
+    if st.session_state.get("rip_copia_prima"):
+        st.download_button("📥 Scarica la copia dei dati com'erano prima del ripristino", st.session_state["rip_copia_prima"],
+                           file_name=f"backup_prima_del_ripristino_{oggi_txt}.xlsx", mime=MIME_XLSX, key="rip_copia_btn")
 
 
 def pagina_preventivo():
@@ -2959,6 +3185,245 @@ def pagina_preventivo():
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 
+def pagina_spese():
+    st.subheader("🧾 Spese e fornitori")
+    st.caption("Registra ogni spesa (affitto campi, materiale, visite mediche, utenze…): l'app la scrive in prima nota da sola. "
+               "Se non è ancora pagata resta come debito verso il fornitore finché non registri il pagamento.")
+    CONTI_PAGAMENTO = {"BONIFICO": "10.01.001", "POS / CARTA": "10.01.001", "PAYPAL": "10.01.003", "CONTANTI": "10.01.002"}
+    df_cat = leggi_df("SELECT id, codice, nome FROM piano_dei_conti WHERE livello = 3 AND tipo = 'COSTO' ORDER BY codice")
+    categorie = {f"{r.nome} ({r.codice})": r.codice for r in df_cat.itertuples()}
+    df_forn = leggi_df("SELECT id, denominazione, partita_iva, codice_fiscale FROM anagrafiche WHERE tipo = 'FORNITORE' ORDER BY denominazione")
+    NUOVO = "— Nuovo fornitore —"
+    fornitori = {NUOVO: None}
+    fornitori.update({r.denominazione: int(r.id) for r in df_forn.itertuples()})
+
+    with st.form("nuova_spesa", clear_on_submit=True):
+        st.markdown("**➕ Nuova spesa**")
+        f1, f2, f3 = st.columns(3)
+        data_sp = f1.date_input("Data del documento", format="DD/MM/YYYY")
+        forn_sel = f2.selectbox("Fornitore", list(fornitori))
+        num_sp = f3.text_input("N° fattura / scontrino / ricevuta")
+        n1, n2 = st.columns(2)
+        nuovo_forn = n1.text_input("Nome del nuovo fornitore (solo se nuovo)")
+        nuovo_piva = n2.text_input("Partita IVA o codice fiscale del nuovo fornitore")
+        d1, d2 = st.columns([2, 1])
+        descr_sp = d1.text_input("Descrizione", placeholder="es. Affitto campo ottobre, 20 palloni, visite mediche")
+        cat_sp = d2.selectbox("Categoria", list(categorie))
+        i1, i2, i3 = st.columns(3)
+        totale_sp = i1.number_input("Totale pagato o da pagare (€)", min_value=0.0, step=10.0,
+                                    help="IVA compresa: per l'associazione l'IVA sugli acquisti è un costo.")
+        iva_sp = i2.number_input("di cui IVA (€)", min_value=0.0, step=1.0)
+        stato_sp = i3.selectbox("Pagamento", [f"Pagata con {m}" for m in CONTI_PAGAMENTO] + ["Da pagare"])
+        if st.form_submit_button("💾 Registra la spesa", type="primary"):
+            nome_forn = nuovo_forn.strip() if fornitori[forn_sel] is None else forn_sel
+            if not nome_forn:
+                st.error("Scegli il fornitore o scrivi il nome di quello nuovo.")
+            elif totale_sp <= 0:
+                st.error("Indica l'importo della spesa.")
+            elif iva_sp > totale_sp:
+                st.error("L'IVA non può superare il totale.")
+            else:
+                modo_sp = None if stato_sp == "Da pagare" else stato_sp.replace("Pagata con ", "")
+                try:
+                    with db_write() as w_conn:
+                        id_forn = fornitori[forn_sel]
+                        if id_forn is None:
+                            codice_id = nuovo_piva.strip().upper()
+                            id_forn = w_conn.execute(
+                                "INSERT INTO anagrafiche (tipo, denominazione, partita_iva, codice_fiscale) VALUES ('FORNITORE', ?, ?, ?)",
+                                [nome_forn, codice_id if codice_id.isdigit() else None, None if codice_id.isdigit() else (codice_id or None)]).lastrowid
+                        conto_avere = CONTI_PAGAMENTO[modo_sp] if modo_sp else "20.01.001"
+                        mov_sp = post_journal(w_conn, data_sp, num_sp.strip() or "Spesa", f"{descr_sp.strip() or cat_sp.split(' (')[0]} - {nome_forn}",
+                                              "ISTITUZIONALE", [(get_conto_id(w_conn, categorie[cat_sp]), descr_sp.strip(), float(totale_sp), 0.0),
+                                                                (get_conto_id(w_conn, conto_avere), "Pagamento" if modo_sp else "Debito verso fornitore", 0.0, float(totale_sp))])
+                        w_conn.execute(
+                            "INSERT INTO fatture_passive (fornitore_id, numero_doc, data_doc, causale_spesa, imponibile, iva, totale, categoria_spesa, "
+                            "modalita_pagamento, data_pagamento, movimento_id, movimento_pagamento_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            [int(id_forn), num_sp.strip(), str(data_sp), descr_sp.strip(), round(totale_sp - iva_sp, 2), float(iva_sp), float(totale_sp),
+                             categorie[cat_sp], modo_sp, str(data_sp) if modo_sp else None, mov_sp, mov_sp if modo_sp else None])
+                    st.session_state["flash"] = f"Spesa di € {totale_sp:,.2f} registrata" + (" e pagata." if modo_sp else ": risulta da pagare.")
+                    st.rerun()
+                except Exception as ex_sp:
+                    st.error(f"Errore nella registrazione della spesa: {ex_sp}")
+
+    df_sp = leggi_df(
+        "SELECT f.id, f.data_doc, a.denominazione AS fornitore, f.numero_doc, f.causale_spesa, f.categoria_spesa, f.totale, f.iva, "
+        "f.modalita_pagamento, f.data_pagamento FROM fatture_passive f JOIN anagrafiche a ON a.id = f.fornitore_id ORDER BY f.data_doc DESC, f.id DESC")
+    nomi_cat = {r.codice: r.nome for r in df_cat.itertuples()}
+    da_pagare = df_sp[df_sp["data_pagamento"].isna()] if not df_sp.empty else df_sp
+    if not da_pagare.empty:
+        with st.expander(f"⏳ Spese da pagare: {len(da_pagare)}, totale € {da_pagare['totale'].sum():,.2f}", expanded=True):
+            opz_pag = {f"{r.fornitore} · {r.numero_doc or 's.n.'} del {pd.to_datetime(r.data_doc).strftime('%d/%m/%Y')} · € {float(r.totale):,.2f}": int(r.id)
+                       for r in da_pagare.itertuples()}
+            with st.form("paga_spesa"):
+                q1, q2, q3 = st.columns([3, 1, 1])
+                sp_sel = q1.selectbox("Spesa", list(opz_pag))
+                data_pag_sp = q2.date_input("Pagata il", format="DD/MM/YYYY")
+                modo_pag_sp = q3.selectbox("Con", list(CONTI_PAGAMENTO))
+                if st.form_submit_button("✅ Registra il pagamento"):
+                    riga_sp = da_pagare[da_pagare["id"] == opz_pag[sp_sel]].iloc[0]
+                    try:
+                        with db_write() as w_conn:
+                            mov_pag = post_journal(w_conn, data_pag_sp, riga_sp["numero_doc"] or "Spesa", f"Pagamento a {riga_sp['fornitore']}", "ISTITUZIONALE",
+                                                   [(get_conto_id(w_conn, "20.01.001"), "Chiusura debito verso fornitore", float(riga_sp["totale"]), 0.0),
+                                                    (get_conto_id(w_conn, CONTI_PAGAMENTO[modo_pag_sp]), "Pagamento", 0.0, float(riga_sp["totale"]))])
+                            w_conn.execute("UPDATE fatture_passive SET modalita_pagamento = ?, data_pagamento = ?, movimento_pagamento_id = ? WHERE id = ?",
+                                           [modo_pag_sp, str(data_pag_sp), mov_pag, int(riga_sp["id"])])
+                        st.session_state["flash"] = f"Pagamento a {riga_sp['fornitore']} registrato."
+                        st.rerun()
+                    except Exception as ex_pag:
+                        st.error(f"Errore nella registrazione del pagamento: {ex_pag}")
+
+    st.markdown("**📒 Registro delle spese**")
+    if df_sp.empty:
+        st.info("Nessuna spesa registrata.")
+    else:
+        ini_s, fin_s, etich_s = esercizio_corrente()
+        nell_es = df_sp[(df_sp["data_doc"] >= str(ini_s)) & (df_sp["data_doc"] <= str(fin_s))]
+        if not nell_es.empty:
+            per_cat = nell_es.groupby("categoria_spesa")["totale"].sum().sort_values(ascending=False)
+            st.caption(f"Esercizio {etich_s}: € {nell_es['totale'].sum():,.2f} — " +
+                       " · ".join(f"{nomi_cat.get(c, c)} € {v:,.2f}" for c, v in per_cat.items()))
+        st.dataframe(pd.DataFrame({
+            "Data": pd.to_datetime(df_sp["data_doc"]).dt.strftime("%d/%m/%Y"), "Fornitore": df_sp["fornitore"], "Documento": df_sp["numero_doc"],
+            "Descrizione": df_sp["causale_spesa"], "Categoria": df_sp["categoria_spesa"].map(lambda c: nomi_cat.get(c, c)),
+            "Totale (€)": df_sp["totale"], "IVA (€)": df_sp["iva"],
+            "Pagata": df_sp.apply(lambda r: f"{pd.to_datetime(r['data_pagamento']).strftime('%d/%m/%Y')} ({r['modalita_pagamento']})"
+                                  if pd.notna(r["data_pagamento"]) else "⏳ da pagare", axis=1)}), width="stretch", hide_index=True)
+        st.caption("Per correggere o eliminare una spesa usa Contabilità → Prima nota → «✏️ Modifica o elimina una registrazione».")
+
+
+def pagina_squadra():
+    st.subheader("📣 Convocazioni e presenze")
+    categorie_sq = [c for c in CATEGORIE_LISTA if c != "STAFF"]
+    df_gioc = leggi_df(
+        """
+        SELECT a.id, a.denominazione, t.categoria, c.scad
+        FROM tesserati_calcio t JOIN anagrafiche a ON a.id = t.anagrafica_id
+        LEFT JOIN (SELECT anagrafica_id, MAX(data_scadenza) AS scad FROM certificati_medici GROUP BY anagrafica_id) c ON c.anagrafica_id = a.id
+        WHERE t.stato = 'ATTIVO' AND t.gioca = 1
+        ORDER BY a.denominazione
+        """)
+    usate = [c for c in categorie_sq if c in set(df_gioc["categoria"])] or categorie_sq
+    cat_sq = st.selectbox("Squadra", usate, key="sq_categoria")
+    gioc_cat = df_gioc[df_gioc["categoria"] == cat_sq]
+    nomi_sq = {int(r.id): r.denominazione for r in gioc_cat.itertuples()}
+    tab_conv, tab_pres, tab_stat = st.tabs(["⚽ Convocazioni", "✅ Presenze allenamenti", "📊 Statistiche"])
+
+    with tab_conv:
+        with st.form("nuova_convocazione", clear_on_submit=True):
+            st.markdown("**➕ Nuova convocazione**")
+            k1, k2, k3 = st.columns(3)
+            data_cv = k1.date_input("Data della partita", format="DD/MM/YYYY")
+            ora_cv = k2.text_input("Ora della partita", placeholder="15:00")
+            avv_cv = k3.text_input("Avversario")
+            k4, k5, k6 = st.columns(3)
+            luogo_cv = k4.text_input("Campo")
+            rit_ora_cv = k5.text_input("Ora del ritrovo", placeholder="13:45")
+            rit_luogo_cv = k6.text_input("Luogo del ritrovo")
+            def etichetta_conv(aid):
+                scad = gioc_cat.loc[gioc_cat["id"] == aid, "scad"].iloc[0]
+                valido = pd.notna(scad) and str(scad) >= str(data_cv)
+                return nomi_sq[aid] + ("" if valido else " ⛔ certificato non valido")
+            conv_cv = st.multiselect("Convocati", list(nomi_sq), format_func=etichetta_conv)
+            note_cv = st.text_area("Note per i convocati (facoltative)", height=70, placeholder="es. portare la tuta di rappresentanza")
+            if st.form_submit_button("💾 Salva la convocazione", type="primary"):
+                if not conv_cv:
+                    st.error("Scegli almeno un convocato.")
+                else:
+                    try:
+                        with db_write() as w_conn:
+                            ev = w_conn.execute(
+                                "INSERT INTO eventi_squadra (tipo, data, ora, categoria, avversario, luogo, ritrovo_ora, ritrovo_luogo, note) "
+                                "VALUES ('PARTITA', ?, ?, ?, ?, ?, ?, ?, ?)",
+                                [str(data_cv), ora_cv.strip() or None, cat_sq, avv_cv.strip() or None, luogo_cv.strip() or None,
+                                 rit_ora_cv.strip() or None, rit_luogo_cv.strip() or None, note_cv.strip() or None]).lastrowid
+                            for aid in conv_cv:
+                                w_conn.execute("INSERT INTO presenze_evento (evento_id, anagrafica_id, stato) VALUES (?, ?, 'CONVOCATO')", [ev, int(aid)])
+                        st.session_state["flash"] = f"Convocazione salvata: {len(conv_cv)} giocatori."
+                        st.session_state["sq_conv_sel_id"] = ev
+                        st.rerun()
+                    except Exception as ex_cv:
+                        st.error(f"Errore nel salvataggio della convocazione: {ex_cv}")
+
+        df_ev = leggi_df("SELECT * FROM eventi_squadra WHERE tipo = 'PARTITA' AND categoria = ? ORDER BY data DESC, id DESC", [cat_sq])
+        if df_ev.empty:
+            st.info("Nessuna convocazione salvata per questa squadra.")
+        else:
+            st.markdown("**📋 Convocazioni salvate**")
+            etich_ev = {f"{pd.to_datetime(r.data).strftime('%d/%m/%Y')}" + (f" contro {r.avversario}" if r.avversario else ""): int(r.id)
+                        for r in df_ev.itertuples()}
+            ids_ev = list(etich_ev.values())
+            scelta_id = st.session_state.get("sq_conv_sel_id")
+            ev_sel = etich_ev[st.selectbox("Convocazione", list(etich_ev), key="sq_conv_sel",
+                                           index=ids_ev.index(scelta_id) if scelta_id in ids_ev else 0)]
+            riga_ev = df_ev[df_ev["id"] == ev_sel].iloc[0]
+            conv_nomi = leggi_df("SELECT a.denominazione FROM presenze_evento p JOIN anagrafiche a ON a.id = p.anagrafica_id "
+                                 "WHERE p.evento_id = ? AND p.stato = 'CONVOCATO'", [ev_sel])["denominazione"].tolist()
+            testo_cv = squadra.testo_convocazione({k: (None if pd.isna(v) else v) for k, v in riga_ev.items()}, conv_nomi, NOME_SOCIETA)
+            st.code(testo_cv, language=None, wrap_lines=True)
+            b1, b2 = st.columns([1, 1])
+            b1.link_button("💬 Condividi su WhatsApp", "https://wa.me/?text=" + urllib.parse.quote(testo_cv),
+                           help="Si apre WhatsApp: scegli il gruppo della squadra.")
+            if b2.button("🗑️ Elimina questa convocazione", key=f"sq_del_{ev_sel}"):
+                with db_write() as w_conn:
+                    w_conn.execute("DELETE FROM presenze_evento WHERE evento_id = ?", [ev_sel])
+                    w_conn.execute("DELETE FROM eventi_squadra WHERE id = ?", [ev_sel])
+                st.session_state["flash"] = "Convocazione eliminata."
+                st.session_state.pop("sq_conv_sel_id", None)
+                st.rerun()
+
+    with tab_pres:
+        p1, p2 = st.columns(2)
+        data_all = p1.date_input("Data dell'allenamento", format="DD/MM/YYYY", key="sq_data_all")
+        ora_all = p2.text_input("Ora (facoltativa)", key="sq_ora_all", placeholder="19:00")
+        esistente = leggi_df("SELECT id FROM eventi_squadra WHERE tipo = 'ALLENAMENTO' AND categoria = ? AND data = ? ORDER BY id LIMIT 1",
+                             [cat_sq, str(data_all)])
+        id_all = int(esistente["id"].iloc[0]) if not esistente.empty else None
+        stati_prec = {}
+        if id_all:
+            stati_prec = {int(r.anagrafica_id): r.stato for r in leggi_df(
+                "SELECT anagrafica_id, stato FROM presenze_evento WHERE evento_id = ?", [id_all]).itertuples()}
+            st.info("Allenamento già registrato per questa data: puoi correggere le presenze e salvare di nuovo.")
+        with st.form(f"presenze_{cat_sq}_{data_all}"):
+            st.caption("Tutti risultano presenti tranne quelli che indichi qui sotto.")
+            assenti = st.multiselect("Assenti", list(nomi_sq), format_func=lambda a: nomi_sq[a],
+                                     default=[a for a, s in stati_prec.items() if s == "ASSENTE" and a in nomi_sq])
+            giustificati = st.multiselect("Assenti giustificati", list(nomi_sq), format_func=lambda a: nomi_sq[a],
+                                          default=[a for a, s in stati_prec.items() if s == "GIUSTIFICATO" and a in nomi_sq])
+            if st.form_submit_button("💾 Salva le presenze", type="primary"):
+                doppi = set(assenti) & set(giustificati)
+                if doppi:
+                    st.error("Una persona non può essere sia assente sia assente giustificata: " + ", ".join(nomi_sq[a] for a in doppi))
+                elif not nomi_sq:
+                    st.error("Nessun giocatore attivo in questa squadra.")
+                else:
+                    try:
+                        with db_write() as w_conn:
+                            ev_all = id_all or w_conn.execute(
+                                "INSERT INTO eventi_squadra (tipo, data, ora, categoria) VALUES ('ALLENAMENTO', ?, ?, ?)",
+                                [str(data_all), ora_all.strip() or None, cat_sq]).lastrowid
+                            w_conn.execute("DELETE FROM presenze_evento WHERE evento_id = ?", [ev_all])
+                            for aid in nomi_sq:
+                                stato = "ASSENTE" if aid in assenti else ("GIUSTIFICATO" if aid in giustificati else "PRESENTE")
+                                w_conn.execute("INSERT INTO presenze_evento (evento_id, anagrafica_id, stato) VALUES (?, ?, ?)", [ev_all, int(aid), stato])
+                        st.session_state["flash"] = f"Presenze salvate: {len(nomi_sq) - len(assenti) - len(giustificati)} presenti su {len(nomi_sq)}."
+                        st.rerun()
+                    except Exception as ex_pr:
+                        st.error(f"Errore nel salvataggio delle presenze: {ex_pr}")
+
+    with tab_stat:
+        ini_sq, fin_sq, etich_sq = esercizio_corrente()
+        df_pr = leggi_df(
+            "SELECT p.anagrafica_id, a.denominazione AS nome, e.tipo, p.stato FROM presenze_evento p "
+            "JOIN eventi_squadra e ON e.id = p.evento_id JOIN anagrafiche a ON a.id = p.anagrafica_id "
+            "WHERE e.categoria = ? AND e.data BETWEEN ? AND ?", [cat_sq, str(ini_sq), str(fin_sq)])
+        n_all_sq = leggi_df("SELECT COUNT(*) AS n FROM eventi_squadra WHERE tipo = 'ALLENAMENTO' AND categoria = ? AND data BETWEEN ? AND ?",
+                            [cat_sq, str(ini_sq), str(fin_sq)])["n"].iloc[0]
+        st.caption(f"Esercizio {etich_sq}: {int(n_all_sq)} allenamenti registrati.")
+        st.dataframe(squadra.statistiche(df_pr), width="stretch", hide_index=True)
+
+
 # ---------------------------------------------------------
 # MENU LATERALE A SEZIONI
 # ---------------------------------------------------------
@@ -2969,10 +3434,12 @@ pagina = st.navigation({
     "Tesserati e squadra": [
         st.Page(pagina_soci, title="Soci, atleti e dirigenti", icon="🏃", url_path="soci"),
         st.Page(pagina_distinte, title="Distinte di gara", icon="📋", url_path="distinte"),
+        st.Page(pagina_squadra, title="Convocazioni e presenze", icon="📣", url_path="convocazioni"),
     ],
     "Incassi e pagamenti": [
         st.Page(pagina_ricevute, title="Ricevute e quote", icon="📜", url_path="ricevute"),
         st.Page(pagina_sponsor, title="Sponsor e pubblicità", icon="🏢", url_path="sponsor"),
+        st.Page(pagina_spese, title="Spese e fornitori", icon="🧾", url_path="spese"),
         st.Page(pagina_lavoro_sportivo, title="Collaboratori e rimborsi", icon="⚽", url_path="collaboratori"),
     ],
     "Contabilità": [
@@ -2983,7 +3450,17 @@ pagina = st.navigation({
     "Impostazioni": [
         st.Page(pagina_parametri, title="Parametri stagione", icon="⚙️", url_path="parametri"),
         st.Page(pagina_piano_conti, title="Piano dei conti", icon="🌳", url_path="piano-dei-conti"),
-        st.Page(pagina_backup, title="Backup ed esportazioni", icon="💾", url_path="backup"),
+        pagina_backup_menu := st.Page(pagina_backup, title="Backup ed esportazioni", icon="💾", url_path="backup"),
     ],
 })
+
+giorni_bk = giorni_da_ultimo_backup()
+if giorni_bk is None or giorni_bk >= GIORNI_PROMEMORIA_BACKUP:
+    st.sidebar.warning("Nessuna copia di sicurezza scaricata finora." if giorni_bk is None
+                       else f"L'ultima copia di sicurezza è di {giorni_bk} giorni fa.", icon="💾")
+    st.sidebar.page_link(pagina_backup_menu, label="Fai il backup adesso", icon="📥")
+    if not st.session_state.get("avviso_backup_mostrato"):
+        st.session_state["avviso_backup_mostrato"] = True
+        st.toast("È ora di scaricare la copia di sicurezza dei dati (pagina Backup ed esportazioni).", icon="💾")
+
 pagina.run()

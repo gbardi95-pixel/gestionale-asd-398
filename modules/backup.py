@@ -155,3 +155,94 @@ def esportazione_esercizio(conn, inizio, fine, etichetta):
         for nome, df in fogli.items():
             scrivi_foglio(writer, nome, df)
     return buffer.getvalue(), conteggi
+
+
+# ---------------------------------------------------------
+# RIPRISTINO DA UNA COPIA COMPLETA
+# ---------------------------------------------------------
+def leggi_copia(file_bytes):
+    """Legge un file creato da backup_completo(). Restituisce (versione dello schema, {tabella: (colonne, righe)}).
+    Solleva ValueError se il file non è una copia completa dell'app."""
+    import openpyxl
+
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
+    except Exception as ex:
+        raise ValueError(f"Il file non è un Excel leggibile ({ex}).")
+    if "Info" not in wb.sheetnames:
+        raise ValueError("Il file non è una copia completa creata dall'app: manca il foglio «Info».")
+    versione = None
+    for riga in wb["Info"].iter_rows(min_row=2, values_only=True):
+        if riga and riga[0] == "Versione dello schema":
+            try:
+                versione = int(riga[1])
+            except (TypeError, ValueError):
+                pass
+    if versione is None:
+        raise ValueError("Nel foglio «Info» manca la versione dello schema: il file non sembra una copia completa dell'app.")
+    tabelle = {}
+    for nome in wb.sheetnames:
+        if nome == "Info":
+            continue
+        righe = list(wb[nome].iter_rows(values_only=True))
+        if not righe:
+            continue
+        colonne = [str(c) for c in righe[0] if c is not None]
+        dati = []
+        for r in righe[1:]:
+            valori = list(r[:len(colonne)])
+            if all(v is None for v in valori):
+                continue
+            # Testi che iniziano con «=» sono stati salvati con un apostrofo davanti per non diventare formule
+            valori = [v[1:] if isinstance(v, str) and v.startswith("'=") else v for v in valori]
+            dati.append(valori)
+        tabelle[nome] = (colonne, dati)
+    return versione, tabelle
+
+
+def _sql_valore(v):
+    if v is None or (isinstance(v, float) and v != v):
+        return "NULL"
+    if isinstance(v, bool):
+        return "1" if v else "0"
+    if isinstance(v, (int, float)):
+        return repr(v)
+    if isinstance(v, (datetime.datetime, datetime.date)):
+        v = v.isoformat(sep=" ") if isinstance(v, datetime.datetime) else v.isoformat()
+    return "'" + str(v).replace("'", "''") + "'"
+
+
+def script_ripristino(conn, tabelle):
+    """Script SQL che sostituisce il contenuto delle tabelle con quello della copia, in un'unica transazione.
+
+    Si ripristinano solo le tabelle e le colonne presenti sia nella copia sia nel database; le tabelle escluse dalla copia
+    (es. il modello Word delle distinte) restano come sono. Restituisce (script, {tabella: righe}).
+    """
+    esistenti = set(elenco_tabelle(conn))
+    istruzioni = ["PRAGMA foreign_keys = OFF;", "BEGIN;"]
+    conteggi = {}
+    for nome, (colonne, righe) in tabelle.items():
+        if nome not in esistenti:
+            continue
+        info = conn.execute(f'PRAGMA table_info("{nome}")').fetchall()
+        colonne_db = {r[1]: r for r in info}  # (cid, nome, tipo, notnull, default, pk)
+        indici = [i for i, c in enumerate(colonne) if c in colonne_db]
+        nomi = [colonne[i] for i in indici]
+        istruzioni.append(f'DELETE FROM "{nome}";')
+        valori_righe = []
+        for r in righe:
+            valori = []
+            for i in indici:
+                v = r[i] if i < len(r) else None
+                col = colonne_db[colonne[i]]
+                if v is None and col[3]:
+                    # Colonna obbligatoria lasciata vuota nel file (Excel non distingue testo vuoto da cella vuota)
+                    v = "" if "TEXT" in str(col[2]).upper() or not col[2] else 0
+                valori.append(_sql_valore(v))
+            valori_righe.append("(" + ", ".join(valori) + ")")
+        elenco_colonne = ", ".join(f'"{c}"' for c in nomi)
+        for inizio in range(0, len(valori_righe), 200):
+            istruzioni.append(f'INSERT INTO "{nome}" ({elenco_colonne}) VALUES ' + ", ".join(valori_righe[inizio:inizio + 200]) + ";")
+        conteggi[nome] = len(righe)
+    istruzioni += ["COMMIT;", "PRAGMA foreign_keys = ON;"]
+    return "\n".join(istruzioni), conteggi
