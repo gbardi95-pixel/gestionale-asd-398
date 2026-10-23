@@ -43,14 +43,23 @@ def voci_persona(tipo_tessera, gioca, ha_scheda, socio_altrove):
     return voci
 
 
-def valore(df_parametri, voce, categoria, campo):
-    """Importo di una voce per la squadra indicata: valore specifico della squadra se c'è, altrimenti quello per tutte."""
+def indice_parametri(df_parametri):
+    """Parametri come dizionario {(voce, squadra): riga}: cercarli qui è molto più veloce che filtrare la tabella ogni volta."""
+    if isinstance(df_parametri, dict):
+        return df_parametri
     if df_parametri is None or df_parametri.empty:
-        return 0.0
+        return {}
+    return {(r["voce"], r["categoria"] if pd.notna(r["categoria"]) else TUTTE): r for r in df_parametri.to_dict("records")}
+
+
+def valore(parametri, voce, categoria, campo):
+    """Importo di una voce per la squadra indicata: valore specifico della squadra se c'è, altrimenti quello per tutte.
+    parametri: tabella dei parametri oppure il suo indice_parametri()."""
+    indice = indice_parametri(parametri)
     for cat in (categoria or TUTTE, TUTTE):
-        riga = df_parametri[(df_parametri["voce"] == voce) & (df_parametri["categoria"].fillna(TUTTE) == cat)]
-        if not riga.empty and pd.notna(riga[campo].iloc[0]):
-            return float(riga[campo].iloc[0])
+        riga = indice.get((voce, cat))
+        if riga is not None and pd.notna(riga.get(campo)):
+            return float(riga[campo])
     return 0.0
 
 
@@ -62,6 +71,7 @@ def situazione_quote(df_tesserati, df_parametri, df_versato):
     df_versato: anagrafica_id, versato (ricevute dell'esercizio).
     """
     versato = {int(r.anagrafica_id): float(r.versato) for r in df_versato.itertuples()} if df_versato is not None else {}
+    df_parametri = indice_parametri(df_parametri)
     righe = []
     for r in df_tesserati.itertuples():
         voci = voci_persona(r.tipo_tessera, bool(r.gioca), bool(str(r.numero_scheda_attivita or "").strip()), bool(r.socio_altra_societa))
@@ -84,6 +94,7 @@ def situazione_quote(df_tesserati, df_parametri, df_versato):
 
 def costo_tesseramenti(df_tesserati, df_parametri):
     """Quanto la società deve all'ente: tessere per voce × costo, iscrizione e cauzione per ogni squadra con tesserati, affiliazione."""
+    df_parametri = indice_parametri(df_parametri)
     conteggio = {}
     for r in df_tesserati.itertuples():
         for v in voci_persona(r.tipo_tessera, bool(r.gioca), bool(str(r.numero_scheda_attivita or "").strip()), bool(r.socio_altra_societa)):

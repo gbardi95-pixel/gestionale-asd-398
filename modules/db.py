@@ -111,8 +111,24 @@ def get_connection():
     return conn
 
 
-def init_db():
-    """Inizializza le tabelle e popola automaticamente il Piano dei Conti se vuoto."""
+def versione_schema_db():
+    """Versione dello schema registrata nel database dall'ultimo aggiornamento (None se mai registrata)."""
+    conn = get_connection()
+    try:
+        riga = conn.execute("SELECT valore FROM impostazioni WHERE chiave = 'versione_schema'").fetchone()
+        return int(riga[0]) if riga else None
+    except Exception:
+        return None  # tabella impostazioni non ancora creata: database da aggiornare
+    finally:
+        conn.close()
+
+
+def init_db(versione_schema=None):
+    """Inizializza le tabelle e popola automaticamente il Piano dei Conti se vuoto.
+
+    A fine aggiornamento registra la versione dello schema: ai riavvii successivi, se la versione è la stessa,
+    l'app salta tutti questi controlli (su Turso sono più di cento comandi, circa 15 secondi).
+    """
     conn = get_connection()
     cursor = conn.cursor()
 
@@ -495,6 +511,11 @@ def init_db():
         "INSERT INTO piano_dei_conti (codice, nome, tipo, livello) VALUES (?, ?, ?, ?) ON CONFLICT(codice) DO NOTHING;",
         PIANO_DEI_CONTI_ASD
     )
+
+    if versione_schema is not None:
+        cursor.execute(
+            "INSERT INTO impostazioni (chiave, valore) VALUES ('versione_schema', ?) ON CONFLICT(chiave) DO UPDATE SET valore = excluded.valore",
+            [str(versione_schema)])
 
     conn.commit()
     conn.close()

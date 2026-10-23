@@ -53,7 +53,7 @@ Ogni pagina è una funzione `pagina_...()` in `app.py`; il menu laterale è cost
 
 Il database Turso è remoto: ogni query costa 0,1–0,5 secondi e Streamlit riesegue tutta la pagina a ogni clic. Per questo:
 
-- **Letture** per mostrare dati: usare sempre `leggi_df(sql, params)`, che tiene il risultato in memoria per 10 minuti su una connessione già aperta. Non usare `pd.read_sql_query` con una connessione propria.
+- **Letture** per mostrare dati: usare sempre `leggi_df(sql, params)`, che tiene il risultato in memoria (fino a 6 ore, svuotata a ogni salvataggio) su una connessione già aperta. Non usare `pd.read_sql_query` con una connessione propria.
 
   ```python
   df = leggi_df("SELECT id, denominazione FROM anagrafiche WHERE tipo = ?", ["SPONSOR"])
@@ -74,7 +74,7 @@ Il database Turso è remoto: ogni query costa 0,1–0,5 secondi e Streamlit ries
 ### Modifiche alla struttura del database
 
 - Le tabelle si creano in `init_db()` (`modules/db.py`) con `CREATE TABLE IF NOT EXISTS`; le colonne nuove con `ALTER TABLE ... ADD COLUMN` dentro `try/except` (se la colonna esiste già l'errore viene ignorato).
-- A ogni modifica della struttura incrementare `VERSIONE_SCHEMA_DB` in `app.py`: Streamlit Cloud aggiorna il codice senza riavviare il server e senza questo numero le migrazioni non vengono eseguite.
+- A ogni modifica della struttura incrementare `VERSIONE_SCHEMA_DB` in `app.py`: Streamlit Cloud aggiorna il codice senza riavviare il server e senza questo numero le migrazioni non vengono eseguite. La versione viene registrata nella tabella `impostazioni` (`versione_schema`): ai riavvii successivi, se coincide, `init_db()` non viene rieseguito e l'avvio è immediato.
 
 ### Contenuti del repository
 

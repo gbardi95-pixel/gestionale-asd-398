@@ -4,13 +4,14 @@ import hmac
 import io
 import os
 import threading
+import time
 import warnings
 import pandas as pd
 import streamlit as st
 from contextlib import contextmanager
 from modules import backup, distinte, esercizio, lavoro_sportivo, libro_soci, preventivo, quote, rendiconto_pdf, solleciti, tesseramento
 from modules import cap as cap_comuni
-from modules.db import PIANO_DEI_CONTI_ASD, get_connection, init_db, usa_turso
+from modules.db import PIANO_DEI_CONTI_ASD, _turso_credentials, get_connection, init_db, usa_turso, versione_schema_db
 
 # ---------------------------------------------------------
 # INIZIALIZZAZIONE & CACHING RESOURCE DB
@@ -19,9 +20,11 @@ from modules.db import PIANO_DEI_CONTI_ASD, get_connection, init_db, usa_turso
 # anche quando Streamlit Cloud aggiorna il codice senza riavviare il server.
 VERSIONE_SCHEMA_DB = 11
 
-@st.cache_resource
+@st.cache_resource(show_spinner="Avvio dell'app…")
 def _setup_database(versione_schema):
-    init_db()
+    # Struttura già aggiornata a questa versione: basta una lettura invece di rifare tutti i controlli
+    if versione_schema_db() != versione_schema:
+        init_db(versione_schema)
     return True
 
 _setup_database(VERSIONE_SCHEMA_DB)
@@ -134,9 +137,9 @@ def _connessione_letture():
     """Connessione tenuta aperta per le letture: aprirne una nuova su Turso costa circa mezzo secondo."""
     return {"conn": get_connection(), "lock": threading.Lock()}
 
-@st.cache_data(ttl=600, show_spinner=False)
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
 def leggi_df(sql, params=None):
-    """Lettura dal database tenuta in memoria per 10 minuti, così i clic sulla pagina non rifanno le query su Turso.
+    """Lettura dal database tenuta in memoria fino a 6 ore, così i clic sulla pagina non rifanno le query su Turso.
 
     La memoria si svuota a ogni salvataggio fatto dall'app (db_write) e con il pulsante «Ricarica dati».
     """
@@ -2756,6 +2759,22 @@ def pagina_piano_conti():
 
 def pagina_backup():
     st.subheader("💾 Backup ed esportazioni in Excel")
+    with st.expander("⏱️ Diagnostica velocità del database"):
+        st.caption("Misura quanto impiega una lettura ad andare e tornare dal database. Sotto i 30 ms l'app è rapida; "
+                   "oltre i 100 ms ogni pagina aperta per la prima volta richiede circa un secondo.")
+        if st.button("Misura adesso", key="diag_misura"):
+            risorsa = _connessione_letture()
+            tempi = []
+            with risorsa["lock"]:
+                for _ in range(5):
+                    t0 = time.perf_counter()
+                    risorsa["conn"].execute("SELECT 1").fetchall()
+                    tempi.append((time.perf_counter() - t0) * 1000)
+            url_db = str(_turso_credentials()[0] or "")  # solo l'indirizzo, il token non viene mostrato
+            regione = url_db.split(".", 1)[1].split(".turso")[0] if usa_turso() and "." in url_db else "database locale"
+            d1, d2 = st.columns(2)
+            d1.metric("Tempo medio di una lettura", f"{sum(tempi[1:]) / 4:.0f} ms")
+            d2.metric("Regione del database", regione)
     st.caption("I file si preparano al momento leggendo i dati aggiornati dal database. Conservali in un posto sicuro "
                "(per esempio Google Drive): contengono dati personali di soci e tesserati.")
     oggi_txt = datetime.date.today().strftime("%Y-%m-%d")
