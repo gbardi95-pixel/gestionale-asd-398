@@ -13,6 +13,7 @@ Applicazione web (Streamlit) per la gestione amministrativa e sportiva di un'ass
 - **Riconciliazione estratti conto** banca e PayPal (CSV / Excel).
 - **Prima nota in partita doppia**, rendiconto economico per esercizio e piano dei conti.
 - **Esercizio sociale** su anno solare o stagione sportiva (mese di inizio impostabile) e **apertura dell'esercizio**: saldi di banca, PayPal e cassa, debiti, quote dei soci e sponsorizzazioni ancora da incassare; i valori si possono riprendere dai saldi di chiusura dell'esercizio precedente.
+- **Backup ed esportazioni in Excel**: copia di sicurezza completa (un foglio per ogni tabella) ed esportazione leggibile di un esercizio per il commercialista (prima nota, totali per conto, ricevute, sponsor, spese, compensi e rimborsi).
 
 ## Installazione
 
@@ -66,7 +67,7 @@ Il database Turso è remoto: ogni query costa 0,1–0,5 secondi e Streamlit ries
   st.rerun()
   ```
 
-- **Controlli subito prima di salvare** (numero documento già usato, progressivi, totali dell'anno): leggere dati sempre aggiornati con `get_ro_conn()`, non con `leggi_df`, e chiudere la connessione in un `finally`.
+- **Controlli subito prima di salvare** (numero documento già usato, progressivi, totali dell'anno): leggere dati sempre aggiornati con `get_ro_conn()`, non con `leggi_df`, e chiudere la connessione in un `finally`. Lo stesso vale per i file del backup, che devono contenere i dati del momento. Una nuova tabella finisce da sola nella copia completa; per averla anche nell'esportazione dell'esercizio va aggiunta una query in `FOGLI_ESERCIZIO` (`modules/backup.py`).
 - Query sempre con parametri `?`, mai valori inseriti nel testo SQL.
 
 ### Modifiche alla struttura del database

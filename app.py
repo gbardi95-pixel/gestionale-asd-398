@@ -8,7 +8,7 @@ import warnings
 import pandas as pd
 import streamlit as st
 from contextlib import contextmanager
-from modules import distinte, esercizio, quote, tesseramento
+from modules import backup, distinte, esercizio, quote, tesseramento
 from modules.db import PIANO_DEI_CONTI_ASD, get_connection, init_db, usa_turso
 
 # ---------------------------------------------------------
@@ -2293,6 +2293,60 @@ def pagina_piano_conti():
     st.dataframe(df_pdc, width="stretch")
 
 
+def pagina_backup():
+    st.subheader("💾 Backup ed esportazioni in Excel")
+    st.caption("I file si preparano al momento leggendo i dati aggiornati dal database. Conservali in un posto sicuro "
+               "(per esempio Google Drive): contengono dati personali di soci e tesserati.")
+    oggi_txt = datetime.date.today().strftime("%Y-%m-%d")
+    MIME_XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+    st.markdown("#### 🗄️ Copia di sicurezza completa")
+    st.write("Un foglio per ogni tabella del database, con tutte le righe e le colonne. "
+             "Il modello Word delle distinte non è incluso: si scarica dalla pagina «Distinte di gara».")
+    if st.button("Prepara la copia completa", key="bk_completo"):
+        try:
+            with st.spinner("Lettura di tutte le tabelle…"):
+                conn_bk = get_ro_conn()
+                try:
+                    st.session_state["bk_completo_file"] = backup.backup_completo(conn_bk, VERSIONE_SCHEMA_DB)
+                finally:
+                    conn_bk.close()
+        except Exception as ex_bk:
+            st.error(f"Errore nella preparazione della copia: {ex_bk}")
+    if "bk_completo_file" in st.session_state:
+        file_bk, conteggi_bk = st.session_state["bk_completo_file"]
+        st.download_button("📥 Scarica la copia completa (.xlsx)", file_bk, file_name=f"backup_gestionale_{oggi_txt}.xlsx", mime=MIME_XLSX)
+        st.caption(f"{len(conteggi_bk)} tabelle, {sum(c['Righe'] for c in conteggi_bk)} righe in tutto.")
+
+    st.markdown("---")
+    st.markdown("#### 📊 Esportazione dell'esercizio per il commercialista")
+    st.write("Prima nota, totali per conto, ricevute, fatture e incassi degli sponsor, spese, compensi e rimborsi "
+             "dell'esercizio scelto, con nomi e importi già leggibili.")
+    mese_ini_bk = mese_inizio_esercizio()
+    date_bk = leggi_df("SELECT DISTINCT data_registrazione FROM movimenti_prima_nota WHERE data_registrazione IS NOT NULL")
+    periodi_bk = {esercizio_corrente()[2]: esercizio_corrente()[:2]}
+    for d in pd.to_datetime(date_bk["data_registrazione"], errors="coerce").dropna():
+        ini_b, fin_b, etich_b = esercizio.periodo_esercizio(d.date(), mese_ini_bk)
+        periodi_bk.setdefault(etich_b, (ini_b, fin_b))
+    es_bk = st.selectbox("Esercizio da esportare", sorted(periodi_bk, reverse=True), key="bk_esercizio")
+    ini_bk, fin_bk = periodi_bk[es_bk]
+    if st.button("Prepara l'esportazione dell'esercizio", key="bk_esercizio_btn"):
+        try:
+            with st.spinner("Preparazione dei fogli…"):
+                conn_bk = get_ro_conn()
+                try:
+                    st.session_state["bk_esercizio_file"] = (es_bk, backup.esportazione_esercizio(conn_bk, ini_bk, fin_bk, es_bk))
+                finally:
+                    conn_bk.close()
+        except Exception as ex_bk:
+            st.error(f"Errore nella preparazione dell'esportazione: {ex_bk}")
+    if st.session_state.get("bk_esercizio_file", (None,))[0] == es_bk:
+        file_es, conteggi_es = st.session_state["bk_esercizio_file"][1]
+        st.download_button(f"📥 Scarica l'esercizio {es_bk} (.xlsx)", file_es,
+                           file_name=f"esercizio_{es_bk.replace('/', '-')}_{oggi_txt}.xlsx", mime=MIME_XLSX)
+        st.dataframe(pd.DataFrame(conteggi_es), hide_index=True)
+
+
 # ---------------------------------------------------------
 # MENU LATERALE A SEZIONI
 # ---------------------------------------------------------
@@ -2316,6 +2370,7 @@ pagina = st.navigation({
     "Impostazioni": [
         st.Page(pagina_parametri, title="Parametri stagione", icon="⚙️", url_path="parametri"),
         st.Page(pagina_piano_conti, title="Piano dei conti", icon="🌳", url_path="piano-dei-conti"),
+        st.Page(pagina_backup, title="Backup ed esportazioni", icon="💾", url_path="backup"),
     ],
 })
 pagina.run()
