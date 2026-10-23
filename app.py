@@ -1856,7 +1856,7 @@ def pagina_ricevute():
                              "Scegli «Quota Iscrizione e Frequenza Campionato».")
                 elif importo > 0:
                     causale_completa = f"{tipo_causale} - {causale_custom}"
-                    bollo = 2.00 if importo > 77.47 else 0.00
+                    bollo = 0.00  # ASD esenti dall'imposta di bollo: art. 27-bis Tabella B DPR 642/1972 (art. 90 c. 6 L. 289/2002)
                     # BONIFICO e POS vanno in banca, PAYPAL sul conto PayPal, CONTANTI in cassa
                     cod_cassa_banca = {"BONIFICO": "10.01.001", "POS": "10.01.001", "PAYPAL": "10.01.003"}.get(pagamento, "10.01.002")
                     cod_ricavo = "50.01.001" if "Annua" in tipo_causale else "50.01.002"
@@ -1918,8 +1918,7 @@ def pagina_ricevute():
     df_ric = leggi_df(
         """
         SELECT r.id, r.numero_ricevuta as 'N. Ricevuta', r.data_emissione as Data, a.denominazione as Socio,
-               r.versante_nome as 'Pagato da', r.causale as Causale, r.importo as 'Importo (€)', r.modalita_pagamento as Pagamento,
-               r.marca_da_bollo as 'Bollo (€)'
+               r.versante_nome as 'Pagato da', r.causale as Causale, r.importo as 'Importo (€)', r.modalita_pagamento as Pagamento
         FROM ricevute_istituzionali r
         JOIN anagrafiche a ON r.anagrafica_id = a.id
         ORDER BY r.id DESC

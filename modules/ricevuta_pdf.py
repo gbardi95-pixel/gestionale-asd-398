@@ -14,6 +14,8 @@ from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, Tabl
 
 GRIGIO_SCURO = colors.HexColor("#5F6B73")
 TRACCIABILI = {"BONIFICO", "POS", "PAYPAL"}
+NOTA_ESENZIONE_BOLLO = ("Esente da imposta di bollo ai sensi dell'art. 27-bis, Tabella B, D.P.R. 642/1972 "
+                        "(esenzione estesa alle associazioni sportive dilettantistiche dall'art. 90, comma 6, L. 289/2002).")
 
 _UNITA = ["", "uno", "due", "tre", "quattro", "cinque", "sei", "sette", "otto", "nove", "dieci", "undici", "dodici",
           "tredici", "quattordici", "quindici", "sedici", "diciassette", "diciotto", "diciannove"]
@@ -115,6 +117,8 @@ def genera(societa, ricevuta):
     note = []
     if ricevuta.get("bollo"):
         note.append(f"Imposta di bollo di {euro(ricevuta['bollo'])} applicata sull'originale.")
+    else:
+        note.append(NOTA_ESENZIONE_BOLLO)
     if ricevuta["pagamento"].upper() not in TRACCIABILI:
         note.append("Pagamento in contanti: non valido per la detrazione delle spese sportive, che richiede un pagamento tracciabile.")
     for n in note:
