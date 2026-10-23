@@ -8,7 +8,7 @@ import warnings
 import pandas as pd
 import streamlit as st
 from contextlib import contextmanager
-from modules import backup, distinte, esercizio, lavoro_sportivo, libro_soci, preventivo, quote, solleciti, tesseramento
+from modules import backup, distinte, esercizio, lavoro_sportivo, libro_soci, preventivo, quote, rendiconto_pdf, solleciti, tesseramento
 from modules.db import PIANO_DEI_CONTI_ASD, get_connection, init_db, usa_turso
 
 # ---------------------------------------------------------
@@ -278,6 +278,18 @@ def saldi_conti_prima_del(data):
         GROUP BY p.codice
         """, [str(data)])
     return {r.codice: round(float(r.saldo), 2) for r in df.itertuples()}
+
+def movimenti_costi_ricavi(inizio, fine):
+    """Totali dare e avere di ogni conto di costo e di ricavo nel periodo (per preventivo e rendiconto)."""
+    return leggi_df(
+        """
+        SELECT p.codice, p.tipo, COALESCE(SUM(r.dare), 0.0) AS dare, COALESCE(SUM(r.avere), 0.0) AS avere
+        FROM righe_prima_nota r
+        JOIN movimenti_prima_nota m ON m.id = r.movimento_id
+        JOIN piano_dei_conti p ON p.id = r.sottoconto_id
+        WHERE m.data_registrazione BETWEEN ? AND ? AND p.tipo IN ('RICAVO', 'COSTO')
+        GROUP BY p.codice, p.tipo
+        """, [str(inizio), str(fine)])
 
 def parametri_esercizio(etichetta):
     """Costi e quote impostati per l'esercizio (vuoto se non ancora impostati)."""
@@ -2365,6 +2377,26 @@ def pagina_prima_nota():
         r3.metric("Avanzo / Disavanzo", f"€ {tot_ricavi - tot_costi:,.2f}")
         st.dataframe(df_rend, width="stretch")
 
+        st.markdown("**📄 Rendiconto per l'assemblea dei soci**")
+        st.caption("PDF con rendiconto economico (a confronto con l'esercizio precedente e con il preventivo, se impostato), "
+                   "disponibilità liquide e situazione patrimoniale a fine esercizio, e spazio per firme e data di approvazione.")
+        if st.button(f"Prepara il PDF del rendiconto {anno_rend}", key=f"rend_pdf_{anno_rend}"):
+            try:
+                ini_pr, fin_pr, etich_pr = esercizio.esercizio_precedente(ini_rend, mese_ini_rend)
+                df_prev_pdf = leggi_df("SELECT codice_conto, importo FROM preventivi WHERE esercizio = ?", [anno_rend])
+                st.session_state["rend_pdf"] = (anno_rend, rendiconto_pdf.genera(
+                    NOME_SOCIETA, anno_rend, ini_rend, fin_rend,
+                    leggi_df("SELECT codice, nome, tipo, livello FROM piano_dei_conti"),
+                    preventivo.consuntivo(movimenti_costi_ricavi(ini_rend, fin_rend)),
+                    preventivo.consuntivo(movimenti_costi_ricavi(ini_pr, fin_pr)), etich_pr,
+                    {r.codice_conto: float(r.importo) for r in df_prev_pdf.itertuples()} if not df_prev_pdf.empty else None,
+                    saldi_conti_prima_del(ini_rend), saldi_conti_prima_del(fin_rend + datetime.timedelta(days=1))))
+            except Exception as ex_pdf:
+                st.error(f"Errore nella preparazione del PDF: {ex_pdf}")
+        if st.session_state.get("rend_pdf", (None,))[0] == anno_rend:
+            st.download_button(f"📥 Scarica il rendiconto {anno_rend} (PDF)", st.session_state["rend_pdf"][1],
+                               file_name=f"rendiconto_{anno_rend.replace('/', '-')}.pdf", mime="application/pdf")
+
     with tab_apertura:
         st.markdown("### 📂 Esercizio sociale e apertura dei conti")
         mese_ini = mese_inizio_esercizio()
@@ -2627,18 +2659,7 @@ def pagina_preventivo():
     df_salvato = leggi_df("SELECT codice_conto, importo FROM preventivi WHERE esercizio = ?", [es_pv])
     salvato = {r.codice_conto: float(r.importo) for r in df_salvato.itertuples()}
 
-    def movimenti_periodo(inizio, fine):
-        return leggi_df(
-            """
-            SELECT p.codice, p.tipo, COALESCE(SUM(r.dare), 0.0) AS dare, COALESCE(SUM(r.avere), 0.0) AS avere
-            FROM righe_prima_nota r
-            JOIN movimenti_prima_nota m ON m.id = r.movimento_id
-            JOIN piano_dei_conti p ON p.id = r.sottoconto_id
-            WHERE m.data_registrazione BETWEEN ? AND ? AND p.tipo IN ('RICAVO', 'COSTO')
-            GROUP BY p.codice, p.tipo
-            """, [str(inizio), str(fine)])
-
-    realizzato = preventivo.consuntivo(movimenti_periodo(ini_pv, fin_pv))
+    realizzato = preventivo.consuntivo(movimenti_costi_ricavi(ini_pv, fin_pv))
     chiave = f"pv_{es_pv}_"
 
     tab_conf, tab_mod = st.tabs(["📊 Confronto", "✏️ Imposta il preventivo"])
@@ -2656,7 +2677,7 @@ def pagina_preventivo():
                 st.session_state[chiave + codice] = float(importo)
         ini_prec, fin_prec, etich_prec = esercizio.esercizio_precedente(ini_pv, mese_ini_pv)
         if b2.button(f"📋 Copia il consuntivo dell'esercizio {etich_prec}", key=chiave + "da_prec"):
-            cons_prec = preventivo.consuntivo(movimenti_periodo(ini_prec, fin_prec))
+            cons_prec = preventivo.consuntivo(movimenti_costi_ricavi(ini_prec, fin_prec))
             if not cons_prec:
                 st.warning(f"Nessun movimento registrato nell'esercizio {etich_prec}.")
             for codice, importo in cons_prec.items():
