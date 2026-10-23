@@ -9,6 +9,7 @@ CONTI_APERTURA = [
     ("10.01.001", "Saldo banca", "DARE"),
     ("10.01.003", "Saldo PayPal", "DARE"),
     ("10.01.002", "Fondo cassa (contanti)", "DARE"),
+    ("10.02.003", "Cauzioni versate per i campionati", "DARE"),
     ("20.01.001", "Debiti verso fornitori", "AVERE"),
     ("20.02.001", "IVA 398 da versare", "AVERE"),
     ("20.02.002", "Debiti verso collaboratori", "AVERE"),

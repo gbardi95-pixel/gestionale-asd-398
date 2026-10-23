@@ -1,15 +1,23 @@
 """Parametri della stagione (costo dei tesseramenti per la società e quote chieste alle persone) e situazione delle quote."""
 import pandas as pd
 
-# Voci dei parametri: (codice, etichetta, si applica alle persone)
+# Voci dei parametri: (codice, etichetta, a chi si applica)
+# PERSONA = per ogni tesserato (costo + quota richiesta); SQUADRA = una volta per ogni squadra iscritta; SOCIETA = una volta sola
 VOCI = [
-    ("ATLETA", "Tessera atleta", True),
-    ("DIRIGENTE", "Tessera dirigente", True),
-    ("DIRIGENTE_ATLETA", "Tessera dirigente/atleta (D/A)", True),
-    ("SCHEDA_ATTIVITA", "Scheda attività", True),
-    ("AFFILIAZIONE", "Affiliazione della società", False),
+    ("ATLETA", "Tessera atleta", "PERSONA"),
+    ("DIRIGENTE", "Tessera dirigente", "PERSONA"),
+    ("DIRIGENTE_ATLETA", "Tessera dirigente/atleta (D/A)", "PERSONA"),
+    ("SCHEDA_ATTIVITA", "Scheda attività", "PERSONA"),
+    ("ISCRIZIONE_CAMPIONATO", "Iscrizione al campionato", "SQUADRA"),
+    ("CAUZIONE", "Cauzione del campionato", "SQUADRA"),
+    ("AFFILIAZIONE", "Affiliazione della società", "SOCIETA"),
 ]
 ETICHETTE = {codice: etichetta for codice, etichetta, _ in VOCI}
+AMBITO = {codice: ambito for codice, _, ambito in VOCI}
+# Conto di prima nota di ogni voce: la cauzione è un deposito da restituire, non un costo
+CONTO_VOCE = {"ISCRIZIONE_CAMPIONATO": "40.01.006", "CAUZIONE": "10.02.003"}
+CONTO_TESSERAMENTI = "40.01.002"
+SQUADRE_SENZA_CAMPIONATO = {"STAFF"}
 TUTTE = ""  # categoria vuota = valore valido per tutte le squadre
 
 
@@ -75,7 +83,7 @@ def situazione_quote(df_tesserati, df_parametri, df_versato):
 
 
 def costo_tesseramenti(df_tesserati, df_parametri):
-    """Quanto la società deve all'ente per i tesseramenti: numero di tessere per voce × costo, più l'affiliazione."""
+    """Quanto la società deve all'ente: tessere per voce × costo, iscrizione e cauzione per ogni squadra con tesserati, affiliazione."""
     conteggio = {}
     for r in df_tesserati.itertuples():
         for v in voci_persona(r.tipo_tessera, bool(r.gioca), bool(str(r.numero_scheda_attivita or "").strip()), bool(r.socio_altra_societa)):
@@ -84,8 +92,17 @@ def costo_tesseramenti(df_tesserati, df_parametri):
     righe = []
     for (voce, categoria), n in sorted(conteggio.items()):
         costo = valore(df_parametri, voce, categoria, "costo_societa")
-        righe.append({"Voce": ETICHETTE[voce], "Squadra": categoria, "Quantità": n, "Costo unitario (€)": costo, "Totale (€)": round(n * costo, 2)})
+        righe.append({"Voce": ETICHETTE[voce], "Squadra": categoria, "Quantità": n, "Costo unitario (€)": costo, "Totale (€)": round(n * costo, 2),
+                      "Conto": CONTO_TESSERAMENTI})
+    squadre = sorted({r.categoria for r in df_tesserati.itertuples() if r.categoria and r.categoria not in SQUADRE_SENZA_CAMPIONATO})
+    for voce in ("ISCRIZIONE_CAMPIONATO", "CAUZIONE"):
+        for categoria in squadre:
+            costo = valore(df_parametri, voce, categoria, "costo_societa")
+            if costo:
+                righe.append({"Voce": ETICHETTE[voce], "Squadra": categoria, "Quantità": 1, "Costo unitario (€)": costo, "Totale (€)": costo,
+                              "Conto": CONTO_VOCE[voce]})
     affiliazione = valore(df_parametri, "AFFILIAZIONE", TUTTE, "costo_societa")
     if affiliazione:
-        righe.append({"Voce": ETICHETTE["AFFILIAZIONE"], "Squadra": "", "Quantità": 1, "Costo unitario (€)": affiliazione, "Totale (€)": affiliazione})
-    return pd.DataFrame(righe, columns=["Voce", "Squadra", "Quantità", "Costo unitario (€)", "Totale (€)"])
+        righe.append({"Voce": ETICHETTE["AFFILIAZIONE"], "Squadra": "", "Quantità": 1, "Costo unitario (€)": affiliazione, "Totale (€)": affiliazione,
+                      "Conto": CONTO_TESSERAMENTI})
+    return pd.DataFrame(righe, columns=["Voce", "Squadra", "Quantità", "Costo unitario (€)", "Totale (€)", "Conto"])

@@ -94,24 +94,6 @@ if "flash_error" in st.session_state:
 
 st.title(f"⚽ {APP_TITLE}")
 
-# Menu Navigazione
-st.sidebar.header("Area Gestionale")
-menu = st.sidebar.radio(
-    "Seleziona Modulo:",
-    [
-        "Dashboard & Alert Scadenze",
-        "Soci, Atleti & Dirigenza",
-        "Parametri Stagione",
-        "Distinte di Gara",
-        "Ricevute Istituzionali (Art. 4)",
-        "Sponsor & Pubblicità (398/91)",
-        "Lavoro Sportivo & Rimborsi (D.Lgs. 36)",
-        "Riconciliazione Estratti Conto",
-        "Prima Nota & Rendiconto ASD",
-        "Piano dei Conti ASD",
-    ],
-)
-
 # Squadre / inquadramenti: allineati ai valori ammessi dal vincolo CHECK del database
 CATEGORIE_LISTA = ["STAFF", "PRIMA_SQUADRA", "JUNIORES", "ALLIEVI", "GIOVANISSIMI", "SCUOLA_CALCIO"]
 
@@ -500,7 +482,7 @@ def parse_bank_statement(file_bytes, file_name, tipo_fonte="BANCA"):
 # ---------------------------------------------------------
 # 1. DASHBOARD & ALERT SCADENZE
 # ---------------------------------------------------------
-if menu == "Dashboard & Alert Scadenze":
+def pagina_dashboard():
     st.subheader("📊 Panoramica Generale & Monitoraggio Sanitario")
 
     today = datetime.date.today().strftime("%Y-%m-%d")
@@ -570,7 +552,7 @@ if menu == "Dashboard & Alert Scadenze":
 # ---------------------------------------------------------
 # 2. SOCI, ATLETI & DIRIGENZA
 # ---------------------------------------------------------
-elif menu == "Soci, Atleti & Dirigenza":
+def pagina_soci():
     st.subheader("🏃 Gestione Anagrafiche: Soci, Dirigenza e Atleti")
 
     tab_list, tab_add, tab_edit = st.tabs([
@@ -1043,7 +1025,7 @@ elif menu == "Soci, Atleti & Dirigenza":
 # ---------------------------------------------------------
 # 3. RICEVUTE ISTITUZIONALI (ART. 4 DPR 633/72)
 # ---------------------------------------------------------
-elif menu == "Parametri Stagione":
+def pagina_parametri():
     st.subheader("⚙️ Parametri della Stagione: costi dei tesseramenti e quote")
 
     mese_ini_par = mese_inizio_esercizio()
@@ -1086,8 +1068,9 @@ elif menu == "Parametri Stagione":
         intest = st.columns([3, 2, 2])
         intest[1].caption("Costo per la società (€)")
         intest[2].caption("Quota richiesta alla persona (€)")
-        for codice, etichetta, per_persone in quote.VOCI:
-            if codice == "AFFILIAZIONE" and cat_par != quote.TUTTE:
+        for codice, etichetta, ambito in quote.VOCI:
+            per_persone = ambito == "PERSONA"
+            if ambito == "SOCIETA" and cat_par != quote.TUTTE:
                 continue
             riga = st.columns([3, 2, 2])
             riga[0].markdown(f"**{etichetta}**")
@@ -1137,39 +1120,88 @@ elif menu == "Parametri Stagione":
         df_costo = quote.costo_tesseramenti(df_tess_par, df_par)
         totale_costo = float(df_costo["Totale (€)"].sum()) if not df_costo.empty else 0.0
         st.metric(f"Totale dovuto all'ente per la stagione {es_par}", f"€ {totale_costo:,.2f}")
-        st.dataframe(df_costo, width="stretch", hide_index=True)
-        st.caption("Calcolato sui tesserati attivi di oggi e sui costi dei parametri.")
-        gia_registrato = leggi_df(
+        st.dataframe(df_costo.drop(columns=["Conto"]), width="stretch", hide_index=True)
+        st.caption("Calcolato sui tesserati attivi di oggi e sui costi dei parametri. Iscrizione e cauzione sono contate una volta "
+                   "per ogni squadra con tesserati (escluso lo staff).")
+
+        # Tre gruppi con conti diversi: la cauzione è un deposito che tornerà indietro, non un costo
+        gruppi_pag = [
+            ("tess", "Tesseramenti e affiliazione", quote.CONTO_TESSERAMENTI),
+            ("iscr", "Iscrizione campionati", quote.CONTO_VOCE["ISCRIZIONE_CAMPIONATO"]),
+            ("cauz", "Cauzioni campionati", quote.CONTO_VOCE["CAUZIONE"]),
+        ]
+        registrato = leggi_df(
             """
-            SELECT COALESCE(SUM(r.dare), 0) AS tot FROM righe_prima_nota r
+            SELECT p.codice, COALESCE(SUM(r.dare), 0) AS tot FROM righe_prima_nota r
             JOIN movimenti_prima_nota m ON m.id = r.movimento_id
             JOIN piano_dei_conti p ON p.id = r.sottoconto_id
-            WHERE p.codice = '40.01.002' AND m.data_registrazione BETWEEN ? AND ?
-            """, [str(ini_par), str(fin_par)])["tot"].iloc[0]
-        st.write(f"Già registrato in prima nota nella stagione come «Tasse affiliazione e tesseramenti»: **€ {gia_registrato:,.2f}**")
+            WHERE p.codice IN (?, ?, ?) AND m.data_registrazione BETWEEN ? AND ? AND m.numero_documento NOT LIKE 'APERTURA%'
+            GROUP BY p.codice
+            """, [g[2] for g in gruppi_pag] + [str(ini_par), str(fin_par)])
+        gia = {r.codice: float(r.tot) for r in registrato.itertuples()}
+        dovuto_gruppo = {g[2]: float(df_costo.loc[df_costo["Conto"] == g[2], "Totale (€)"].sum()) for g in gruppi_pag}
+        st.dataframe(pd.DataFrame([{"Voce": nome, "Dovuto (€)": dovuto_gruppo[conto], "Già pagato nella stagione (€)": gia.get(conto, 0.0),
+                                    "Da pagare (€)": round(dovuto_gruppo[conto] - gia.get(conto, 0.0), 2)} for _, nome, conto in gruppi_pag]),
+                     width="stretch", hide_index=True)
+
         with st.form(f"paga_tesseramenti_{es_par}", clear_on_submit=True):
             st.markdown("**Registra un pagamento all'ente**")
-            p1, p2, p3 = st.columns(3)
+            p1, p2 = st.columns(2)
             data_pag = p1.date_input("Data pagamento", format="DD/MM/YYYY")
-            importo_pag = p2.number_input("Importo (€)", min_value=0.0, value=max(round(totale_costo - float(gia_registrato), 2), 0.0), step=10.0)
-            modo_pag = p3.selectbox("Pagato con", ["BONIFICO", "POS", "PAYPAL", "CONTANTI"])
+            modo_pag = p2.selectbox("Pagato con", ["BONIFICO", "POS", "PAYPAL", "CONTANTI"])
+            importi_pag = {}
+            colonne_pag = st.columns(3)
+            for col, (chiave, nome, conto) in zip(colonne_pag, gruppi_pag):
+                importi_pag[conto] = col.number_input(f"{nome} (€)", min_value=0.0, step=10.0, key=f"pag_{es_par}_{chiave}",
+                                                      value=max(round(dovuto_gruppo[conto] - gia.get(conto, 0.0), 2), 0.0))
             if st.form_submit_button("Registra in prima nota"):
-                if importo_pag <= 0:
-                    st.error("Inserisci un importo maggiore di zero.")
+                totale_pag = round(sum(importi_pag.values()), 2)
+                if totale_pag <= 0:
+                    st.error("Inserisci almeno un importo maggiore di zero.")
                 else:
                     try:
                         with db_write() as w_conn:
-                            acc_costo = get_conto_id(w_conn, "40.01.002")
+                            righe_pag = [(get_conto_id(w_conn, conto), nome, float(importi_pag[conto]), 0.0)
+                                         for _, nome, conto in gruppi_pag if importi_pag[conto] > 0]
                             acc_fin = get_conto_id(w_conn, {"BONIFICO": "10.01.001", "POS": "10.01.001", "PAYPAL": "10.01.003"}.get(modo_pag, "10.01.002"))
-                            post_journal(w_conn, data_pag, f"Tesseramenti {es_par}", f"Pagamento affiliazione e tesseramenti stagione {es_par}", "ISTITUZIONALE",
-                                         [(acc_costo, "Affiliazione e tesseramenti", float(importo_pag), 0.0),
-                                          (acc_fin, "Pagamento all'ente", 0.0, float(importo_pag))])
-                        st.session_state["flash"] = f"Pagamento di € {importo_pag:,.2f} registrato in prima nota."
+                            righe_pag.append((acc_fin, "Pagamento all'ente", 0.0, totale_pag))
+                            post_journal(w_conn, data_pag, f"Ente {es_par}", f"Pagamento all'ente di tesseramento, stagione {es_par}", "ISTITUZIONALE", righe_pag)
+                        st.session_state["flash"] = f"Pagamento di € {totale_pag:,.2f} registrato in prima nota."
                         st.rerun()
                     except Exception as ex_pag:
                         st.error(f"Errore nella registrazione: {ex_pag}")
 
-elif menu == "Distinte di Gara":
+        # Cauzione restituita a fine campionato, eventualmente meno multe e sanzioni trattenute
+        saldo_cauzioni = saldi_conti_prima_del(datetime.date.today() + datetime.timedelta(days=1)).get(quote.CONTO_VOCE["CAUZIONE"], 0.0)
+        with st.expander(f"↩️ Restituzione cauzione (cauzioni versate ancora da recuperare: € {saldo_cauzioni:,.2f})"):
+            with st.form(f"restituzione_cauzione_{es_par}", clear_on_submit=True):
+                r1, r2, r3, r4 = st.columns(4)
+                data_rest = r1.date_input("Data", format="DD/MM/YYYY")
+                rest = r2.number_input("Restituito (€)", min_value=0.0, step=10.0)
+                trattenuto = r3.number_input("Trattenuto per multe/sanzioni (€)", min_value=0.0, step=10.0)
+                modo_rest = r4.selectbox("Ricevuto su", ["BONIFICO", "PAYPAL", "CONTANTI"])
+                if st.form_submit_button("Registra restituzione"):
+                    totale_rest = round(rest + trattenuto, 2)
+                    if totale_rest <= 0:
+                        st.error("Inserisci l'importo restituito o trattenuto.")
+                    else:
+                        try:
+                            with db_write() as w_conn:
+                                righe_rest = []
+                                if rest > 0:
+                                    acc_fin = get_conto_id(w_conn, {"BONIFICO": "10.01.001", "PAYPAL": "10.01.003"}.get(modo_rest, "10.01.002"))
+                                    righe_rest.append((acc_fin, "Cauzione restituita", float(rest), 0.0))
+                                if trattenuto > 0:
+                                    righe_rest.append((get_conto_id(w_conn, quote.CONTO_VOCE["ISCRIZIONE_CAMPIONATO"]), "Multe e sanzioni trattenute dalla cauzione",
+                                                       float(trattenuto), 0.0))
+                                righe_rest.append((get_conto_id(w_conn, quote.CONTO_VOCE["CAUZIONE"]), "Chiusura cauzione", 0.0, totale_rest))
+                                post_journal(w_conn, data_rest, "Cauzione", "Restituzione cauzione campionato", "ISTITUZIONALE", righe_rest)
+                            st.session_state["flash"] = f"Restituzione cauzione registrata (€ {rest:,.2f} restituiti, € {trattenuto:,.2f} trattenuti)."
+                            st.rerun()
+                        except Exception as ex_rest:
+                            st.error(f"Errore nella registrazione: {ex_rest}")
+
+def pagina_distinte():
     st.subheader("📋 Distinte di Gara")
 
     RUOLI_DISTINTA = ["Allenatore", "Allenatore in seconda", "Dirigente accompagnatore", "Presidente", "Vice presidente",
@@ -1467,7 +1499,7 @@ elif menu == "Distinte di Gara":
             st.session_state["flash"] = "Ripristinato il modello generico."
             st.rerun()
 
-elif menu == "Ricevute Istituzionali (Art. 4)":
+def pagina_ricevute():
     st.subheader("📜 Emissione Ricevute Istituzionali / Quote Associative")
 
     with st.expander("➕ Aggiungi Nuovo Socio / Persona Fisica in Anagrafica"):
@@ -1595,7 +1627,7 @@ elif menu == "Ricevute Istituzionali (Art. 4)":
 # ---------------------------------------------------------
 # 4. SPONSOR & PUBBLICITÀ (REGIME LEGGE 398/91)
 # ---------------------------------------------------------
-elif menu == "Sponsor & Pubblicità (398/91)":
+def pagina_sponsor():
     st.subheader("🏢 Gestione Fatture Sponsorizzazioni e Prospetto 398/91")
 
     with st.expander("➕ Aggiungi Nuova Azienda Sponsor"):
@@ -1727,7 +1759,7 @@ elif menu == "Sponsor & Pubblicità (398/91)":
 # ---------------------------------------------------------
 # 5. LAVORO SPORTIVO & RIMBORSI (D.LGS. 36/2021)
 # ---------------------------------------------------------
-elif menu == "Lavoro Sportivo & Rimborsi (D.Lgs. 36)":
+def pagina_lavoro_sportivo():
     st.subheader("⚽ Gestione Staff Tecnico, Compensi Sportivi e Trasferte Campionato")
 
     tab_comp, tab_rimb = st.tabs(["Compensi Collaboratori Sportivi", "Rimborsi Spesa Trasferta Partite"])
@@ -1826,7 +1858,7 @@ elif menu == "Lavoro Sportivo & Rimborsi (D.Lgs. 36)":
 # ---------------------------------------------------------
 # 6. RICONCILIAZIONE ESTRATTI CONTO
 # ---------------------------------------------------------
-elif menu == "Riconciliazione Estratti Conto":
+def pagina_estratti_conto():
     st.subheader("🏦 Riconciliazione Movimenti Bancari e PayPal")
 
     tab_upload, tab_saved, tab_manual = st.tabs([
@@ -1983,7 +2015,7 @@ elif menu == "Riconciliazione Estratti Conto":
 # ---------------------------------------------------------
 # 7. PRIMA NOTA & RENDICONTO ASD
 # ---------------------------------------------------------
-elif menu == "Prima Nota & Rendiconto ASD":
+def pagina_prima_nota():
     st.subheader("📖 Giornale di Prima Nota e Rendiconto Economico Finanziario ASD")
 
     tab_giornale, tab_rendiconto, tab_apertura = st.tabs(["Giornale di Prima Nota (Partita Doppia)", "Rendiconto Economico Finanziario", "📂 Apertura esercizio"])
@@ -2238,7 +2270,7 @@ elif menu == "Prima Nota & Rendiconto ASD":
 # ---------------------------------------------------------
 # 8. PIANO DEI CONTI ASD
 # ---------------------------------------------------------
-elif menu == "Piano dei Conti ASD":
+def pagina_piano_conti():
     st.subheader("🌳 Struttura del Piano dei Conti ASD (Legge 398/91)")
 
     if st.button("🔄 Ripopola / Aggiorna Piano dei Conti Predefinito"):
@@ -2259,3 +2291,31 @@ elif menu == "Piano dei Conti ASD":
 
     df_pdc = leggi_df("SELECT codice, nome, tipo, livello FROM piano_dei_conti ORDER BY codice")
     st.dataframe(df_pdc, width="stretch")
+
+
+# ---------------------------------------------------------
+# MENU LATERALE A SEZIONI
+# ---------------------------------------------------------
+pagina = st.navigation({
+    "Generale": [
+        st.Page(pagina_dashboard, title="Dashboard e scadenze", icon="📊", url_path="dashboard", default=True),
+    ],
+    "Tesserati e squadra": [
+        st.Page(pagina_soci, title="Soci, atleti e dirigenti", icon="🏃", url_path="soci"),
+        st.Page(pagina_distinte, title="Distinte di gara", icon="📋", url_path="distinte"),
+    ],
+    "Incassi e pagamenti": [
+        st.Page(pagina_ricevute, title="Ricevute e quote", icon="📜", url_path="ricevute"),
+        st.Page(pagina_sponsor, title="Sponsor e pubblicità", icon="🏢", url_path="sponsor"),
+        st.Page(pagina_lavoro_sportivo, title="Collaboratori e rimborsi", icon="⚽", url_path="collaboratori"),
+    ],
+    "Contabilità": [
+        st.Page(pagina_prima_nota, title="Prima nota, rendiconto e apertura", icon="📖", url_path="prima-nota"),
+        st.Page(pagina_estratti_conto, title="Estratti conto", icon="🏦", url_path="estratti-conto"),
+    ],
+    "Impostazioni": [
+        st.Page(pagina_parametri, title="Parametri stagione", icon="⚙️", url_path="parametri"),
+        st.Page(pagina_piano_conti, title="Piano dei conti", icon="🌳", url_path="piano-dei-conti"),
+    ],
+})
+pagina.run()

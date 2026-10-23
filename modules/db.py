@@ -14,6 +14,7 @@ PIANO_DEI_CONTI_ASD = [
     ('10.02', 'Crediti Commerciali e Istituzionali', 'ATTIVITA', 2),
     ('10.02.001', 'Crediti v/Soci e Calciatori', 'ATTIVITA', 3),
     ('10.02.002', 'Crediti v/Sponsor e Pubblicità', 'ATTIVITA', 3),
+    ('10.02.003', 'Depositi Cauzionali Versati (Campionati)', 'ATTIVITA', 3),
 
     # 20. PASSIVITÀ
     ('20', 'PASSIVITÀ E DEBITI', 'PASSIVITA', 1),
@@ -37,6 +38,7 @@ PIANO_DEI_CONTI_ASD = [
     ('40.01.003', 'Materiale Sportivo e Abbigliamento Gara', 'COSTO', 3),
     ('40.01.004', 'Affitto Campi e Strutture Sportive', 'COSTO', 3),
     ('40.01.005', 'Spese Sanitarie e Visite Mediche', 'COSTO', 3),
+    ('40.01.006', 'Iscrizione Campionati, Multe e Sanzioni Sportive', 'COSTO', 3),
     ('40.02', 'Costi Generali e Amministrativi', 'COSTO', 2),
     ('40.02.001', 'Consulenze Amministrative e Fiscali', 'COSTO', 3),
     ('40.02.002', 'Utenze e Manutenzioni Impianti', 'COSTO', 3),
@@ -473,13 +475,12 @@ def init_db():
         except Exception:
             pass
 
-    # AUTO-POPOLAMENTO AUTOMATICO PIANO DEI CONTI
-    cursor.execute("SELECT COUNT(*) FROM piano_dei_conti;")
-    if cursor.fetchone()[0] == 0:
-        cursor.executemany(
-            "INSERT INTO piano_dei_conti (codice, nome, tipo, livello) VALUES (?, ?, ?, ?);",
-            PIANO_DEI_CONTI_ASD
-        )
+    # PIANO DEI CONTI: aggiunge i conti predefiniti mancanti (anche quelli introdotti dagli aggiornamenti),
+    # senza modificare quelli già presenti
+    cursor.executemany(
+        "INSERT INTO piano_dei_conti (codice, nome, tipo, livello) VALUES (?, ?, ?, ?) ON CONFLICT(codice) DO NOTHING;",
+        PIANO_DEI_CONTI_ASD
+    )
 
     conn.commit()
     conn.close()
