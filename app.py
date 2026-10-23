@@ -8,7 +8,7 @@ import warnings
 import pandas as pd
 import streamlit as st
 from contextlib import contextmanager
-from modules import distinte, esercizio, tesseramento
+from modules import distinte, esercizio, quote, tesseramento
 from modules.db import PIANO_DEI_CONTI_ASD, get_connection, init_db, usa_turso
 
 # ---------------------------------------------------------
@@ -16,7 +16,7 @@ from modules.db import PIANO_DEI_CONTI_ASD, get_connection, init_db, usa_turso
 # ---------------------------------------------------------
 # Incrementare a ogni modifica dello schema del DB: forza init_db() (e le migrazioni)
 # anche quando Streamlit Cloud aggiorna il codice senza riavviare il server.
-VERSIONE_SCHEMA_DB = 7
+VERSIONE_SCHEMA_DB = 8
 
 @st.cache_resource
 def _setup_database(versione_schema):
@@ -101,6 +101,7 @@ menu = st.sidebar.radio(
     [
         "Dashboard & Alert Scadenze",
         "Soci, Atleti & Dirigenza",
+        "Parametri Stagione",
         "Distinte di Gara",
         "Ricevute Istituzionali (Art. 4)",
         "Sponsor & Pubblicità (398/91)",
@@ -110,6 +111,9 @@ menu = st.sidebar.radio(
         "Piano dei Conti ASD",
     ],
 )
+
+# Squadre / inquadramenti: allineati ai valori ammessi dal vincolo CHECK del database
+CATEGORIE_LISTA = ["STAFF", "PRIMA_SQUADRA", "JUNIORES", "ALLIEVI", "GIOVANISSIMI", "SCUOLA_CALCIO"]
 
 # ---------------------------------------------------------
 # HELPER DB & FUNZIONI UTILITY
@@ -282,6 +286,25 @@ def saldi_conti_prima_del(data):
         GROUP BY p.codice
         """, [str(data)])
     return {r.codice: round(float(r.saldo), 2) for r in df.itertuples()}
+
+def parametri_esercizio(etichetta):
+    """Costi e quote impostati per l'esercizio (vuoto se non ancora impostati)."""
+    return leggi_df("SELECT voce, categoria, costo_societa, quota_richiesta FROM parametri_stagione WHERE esercizio = ?", [etichetta])
+
+def dati_quote(inizio, fine):
+    """Tesserati attivi con i dati per calcolare la quota, e quanto ha versato ognuno nell'esercizio (escluse le quote pregresse)."""
+    df_tess = leggi_df(
+        """
+        SELECT a.id AS anagrafica_id, a.denominazione, t.categoria, t.tipo_tessera, t.gioca, t.numero_scheda_attivita,
+               t.socio_altra_societa, t.quota_stagionale
+        FROM tesserati_calcio t JOIN anagrafiche a ON a.id = t.anagrafica_id
+        WHERE t.stato = 'ATTIVO'
+        ORDER BY a.denominazione
+        """)
+    df_vers = leggi_df(
+        "SELECT anagrafica_id, SUM(importo) AS versato FROM ricevute_istituzionali "
+        "WHERE credito_pregresso = 0 AND data_emissione BETWEEN ? AND ? GROUP BY anagrafica_id", [str(inizio), str(fine)])
+    return df_tess, df_vers
 
 def crediti_residui(etichetta, inizio, fine, tipo):
     """Crediti ancora da incassare a fine esercizio, persona per persona (tipo SOCIO) o sponsor per sponsor (tipo SPONSOR).
@@ -521,7 +544,11 @@ if menu == "Dashboard & Alert Scadenze":
 
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("Anagrafiche Attive", int(num_tesserati), f"{int(num_giocatori)} giocano", delta_color="off")
-    k2.metric(f"Quote Incassate ({current_year})", f"€ {tot_quote:,.2f}")
+    ini_dash, fin_dash, etich_dash = esercizio_corrente()
+    df_tess_dash, df_vers_dash = dati_quote(ini_dash, fin_dash)
+    da_incassare_dash = quote.situazione_quote(df_tess_dash, parametri_esercizio(etich_dash), df_vers_dash)["Da versare (€)"].clip(lower=0).sum()
+    k2.metric(f"Quote Incassate ({current_year})", f"€ {tot_quote:,.2f}",
+              f"€ {da_incassare_dash:,.2f} da incassare (stagione {etich_dash})" if da_incassare_dash else None, delta_color="off")
     k3.metric(f"Ricavi Sponsor 398 ({current_year})", f"€ {tot_sponsor:,.2f}")
     k4.metric(f"IVA 398 da Versare 50% ({current_year})", f"€ {iva_50_versare:,.2f}")
 
@@ -552,8 +579,6 @@ elif menu == "Soci, Atleti & Dirigenza":
         "✏️ Modifica / Elimina Scheda"
     ])
 
-    # Allineato rigorosamente ai valori ammessi dal vincolo CHECK del database
-    CATEGORIE_LISTA = ["STAFF", "PRIMA_SQUADRA", "JUNIORES", "ALLIEVI", "GIOVANISSIMI", "SCUOLA_CALCIO"]
     RUOLI_LISTA = ["Presidente", "Vice Presidente", "Consigliere", "Dirigente", "Dirigente Accompagnatore", "Segretario", "Allenatore", "Portiere", "Difensore", "Centrocampista", "Attaccante", "Socio"]
 
     with tab_list:
@@ -569,7 +594,8 @@ elif menu == "Soci, Atleti & Dirigenza":
                    t.numero_maglia as 'Maglia',
                    a.tipo_documento as 'Documento',
                    a.numero_documento as 'N° Documento',
-                   t.quota_stagionale as 'Quota Dovuta (€)',
+                   CASE WHEN t.socio_altra_societa = 1 THEN 'No (socio altrove)' ELSE 'Sì' END as 'Socio',
+                   t.quota_stagionale as 'Quota Personalizzata (€)',
                    CASE WHEN t.gioca = 1 THEN 'Sì' ELSE 'No' END as Gioca,
                    CASE WHEN t.gioca = 1 THEN COALESCE(c.data_scadenza, 'MANCANTE') ELSE 'Non richiesto' END as 'Scadenza Medico',
                    t.stato as Stato
@@ -632,7 +658,8 @@ elif menu == "Soci, Atleti & Dirigenza":
                 c4, c5, c6 = st.columns(3)
                 categoria = c4.selectbox("Categoria / Inquadramento", CATEGORIE_LISTA)
                 ruolo = c5.selectbox("Ruolo", RUOLI_LISTA)
-                quota = c6.number_input("Quota dovuta Anno Sportivo (€)", min_value=0.0, step=10.0)
+                quota = c6.number_input("Quota personalizzata (€)", min_value=0.0, step=10.0,
+                                        help="Lascia 0 per usare la quota dei Parametri Stagione.")
 
                 c7, c8, c9, c10 = st.columns(4)
                 tipo_tess = c7.text_input("Tipo tessera (es. A, D, D/A)")
@@ -641,6 +668,7 @@ elif menu == "Soci, Atleti & Dirigenza":
                 num_doc = c10.text_input("N° documento d'identità")
 
                 gioca = st.checkbox("⚽ Gioca / svolge attività sportiva (certificato medico obbligatorio)", value=True)
+                socio_altrove = st.checkbox("Socio di un'altra società: qui ha solo la scheda attività", help="Il numero di tessera inserito è quello della scheda attività. Non è socio di questa società: non paga la quota associativa.")
 
                 st.markdown("---")
                 st.write("**Certificato Medico Agonistico** (solo per chi gioca: lascia vuoto se non disponibile)")
@@ -662,10 +690,10 @@ elif menu == "Soci, Atleti & Dirigenza":
                                 anag_id = res1.lastrowid
 
                                 w_conn.execute(
-                                    "INSERT INTO tesserati_calcio (anagrafica_id, numero_tessera, tipo_tessera, numero_maglia, categoria, ruolo, data_tesseramento, quota_stagionale, gioca) "
-                                    "VALUES (?, ?, ?, ?, ?, ?, strftime('%Y-%m-%d', 'now'), ?, ?)",
+                                    "INSERT INTO tesserati_calcio (anagrafica_id, numero_tessera, tipo_tessera, numero_maglia, categoria, ruolo, data_tesseramento, "
+                                    "quota_stagionale, gioca, socio_altra_societa) VALUES (?, ?, ?, ?, ?, ?, strftime('%Y-%m-%d', 'now'), ?, ?, ?)",
                                     [int(anag_id), str(matricola).strip(), str(tipo_tess).strip() or None, int(maglia) or None, str(categoria), str(ruolo),
-                                     float(quota), int(gioca)]
+                                     float(quota), int(gioca), int(socio_altrove)]
                                 )
 
                                 if data_scad:
@@ -860,7 +888,7 @@ elif menu == "Soci, Atleti & Dirigenza":
 
             df_a = leggi_df("SELECT denominazione, codice_fiscale, tipo_documento, numero_documento FROM anagrafiche WHERE id = ?", [selected_anag_id])
             df_t = leggi_df(
-                "SELECT numero_tessera, numero_scheda_attivita, tipo_tessera, numero_maglia, categoria, ruolo, quota_stagionale, stato, gioca "
+                "SELECT numero_tessera, numero_scheda_attivita, tipo_tessera, numero_maglia, categoria, ruolo, quota_stagionale, stato, gioca, socio_altra_societa "
                 "FROM tesserati_calcio WHERE anagrafica_id = ?", [selected_anag_id])
             df_c = leggi_df("SELECT data_rilascio, data_scadenza, medico_certificatore FROM certificati_medici WHERE anagrafica_id = ? ORDER BY data_scadenza DESC", [selected_anag_id])
 
@@ -880,6 +908,7 @@ elif menu == "Soci, Atleti & Dirigenza":
             cur_quota = float(first_val(df_t, "quota_stagionale", 0.0))
             cur_stato = first_val(df_t, "stato", "ATTIVO")
             cur_gioca = bool(int(first_val(df_t, "gioca", 1)))
+            cur_socio_altrove = bool(int(first_val(df_t, "socio_altra_societa", 0) or 0))
 
             has_cert = not df_c.empty
             cur_ril = first_val(df_c, "data_rilascio")
@@ -901,7 +930,8 @@ elif menu == "Soci, Atleti & Dirigenza":
                 # Un ruolo non in elenco (es. "Calciatore" da importazione) viene mantenuto, non sostituito col primo
                 ruoli_opzioni = RUOLI_LISTA if cur_role in RUOLI_LISTA else [cur_role] + RUOLI_LISTA
                 e_ruolo = e_col5.selectbox("Ruolo", ruoli_opzioni, index=ruoli_opzioni.index(cur_role))
-                e_quota = e_col6.number_input("Quota dovuta Anno Sportivo (€)", value=float(cur_quota), step=10.0)
+                e_quota = e_col6.number_input("Quota personalizzata (€)", value=float(cur_quota), step=10.0,
+                                              help="Lascia 0 per usare la quota dei Parametri Stagione.")
 
                 e_col7, e_col8, e_col9 = st.columns(3)
                 st_opts = ["ATTIVO", "INATTIVO", "IN_PRESTITO"]
@@ -913,6 +943,7 @@ elif menu == "Soci, Atleti & Dirigenza":
                 e_tipo_doc = d_col1.text_input("Documento d'identità (es. CIE, C.I., PT)", value=cur_tipo_doc)
                 e_num_doc = d_col2.text_input("N° documento d'identità", value=cur_num_doc)
                 e_gioca = st.checkbox("⚽ Gioca / svolge attività sportiva (certificato medico obbligatorio)", value=cur_gioca)
+                e_socio_altrove = st.checkbox("Socio di un'altra società: qui ha solo la scheda attività", value=cur_socio_altrove, help="Il numero di tessera inserito è quello della scheda attività. Non è socio di questa società: non paga la quota associativa.")
 
                 st.markdown("---")
                 st.write("**Certificato Medico Agonistico** (solo per chi gioca)")
@@ -947,16 +978,16 @@ elif menu == "Soci, Atleti & Dirigenza":
                             if has_tess:
                                 w_conn.execute(
                                     "UPDATE tesserati_calcio SET numero_tessera = ?, numero_scheda_attivita = ?, tipo_tessera = ?, numero_maglia = ?, categoria = ?, ruolo = ?, "
-                                    "quota_stagionale = ?, stato = ?, gioca = ? WHERE anagrafica_id = ?",
+                                    "quota_stagionale = ?, stato = ?, gioca = ?, socio_altra_societa = ? WHERE anagrafica_id = ?",
                                     [str(e_matricola).strip(), str(e_scheda).strip(), str(e_tipo_tess).strip() or None, int(e_maglia) or None, str(e_categoria),
-                                     str(e_ruolo), float(e_quota), str(e_stato), int(e_gioca), int(selected_anag_id)]
+                                     str(e_ruolo), float(e_quota), str(e_stato), int(e_gioca), int(e_socio_altrove), int(selected_anag_id)]
                                 )
                             else:
                                 w_conn.execute(
                                     "INSERT INTO tesserati_calcio (anagrafica_id, numero_tessera, numero_scheda_attivita, tipo_tessera, numero_maglia, categoria, ruolo, "
-                                    "data_tesseramento, quota_stagionale, stato, gioca) VALUES (?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%d', 'now'), ?, ?, ?)",
+                                    "data_tesseramento, quota_stagionale, stato, gioca, socio_altra_societa) VALUES (?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%d', 'now'), ?, ?, ?, ?)",
                                     [int(selected_anag_id), str(e_matricola).strip(), str(e_scheda).strip(), str(e_tipo_tess).strip() or None, int(e_maglia) or None,
-                                     str(e_categoria), str(e_ruolo), float(e_quota), str(e_stato), int(e_gioca)]
+                                     str(e_categoria), str(e_ruolo), float(e_quota), str(e_stato), int(e_gioca), int(e_socio_altrove)]
                                 )
 
                             if e_data_scad:
@@ -1012,6 +1043,132 @@ elif menu == "Soci, Atleti & Dirigenza":
 # ---------------------------------------------------------
 # 3. RICEVUTE ISTITUZIONALI (ART. 4 DPR 633/72)
 # ---------------------------------------------------------
+elif menu == "Parametri Stagione":
+    st.subheader("⚙️ Parametri della Stagione: costi dei tesseramenti e quote")
+
+    mese_ini_par = mese_inizio_esercizio()
+    oggi_par = datetime.date.today()
+    periodi_par = {}
+    for d in (oggi_par - datetime.timedelta(days=365), oggi_par, oggi_par + datetime.timedelta(days=365)):
+        ini_p, fin_p, etich_p = esercizio.periodo_esercizio(d, mese_ini_par)
+        periodi_par[etich_p] = (ini_p, fin_p)
+    etich_cor = esercizio.periodo_esercizio(oggi_par, mese_ini_par)[2]
+    elenco_par = sorted(periodi_par, reverse=True)
+    es_par = st.selectbox("Esercizio / stagione", elenco_par, index=elenco_par.index(etich_cor))
+    ini_par, fin_par = periodi_par[es_par]
+    df_par = parametri_esercizio(es_par)
+
+    tab_valori, tab_quote, tab_costo = st.tabs(["💶 Costi e quote", "📋 Situazione quote", "🏛️ Costo tesseramenti"])
+
+    with tab_valori:
+        st.caption("Costo per la società = quanto si paga all'ente per ogni tesseramento. Quota richiesta = quanto la società chiede alla persona. "
+                   "Chi ha una quota personalizzata nella sua scheda (sezione Soci) paga quella.")
+        if df_par.empty:
+            es_prec_par = esercizio.esercizio_precedente(ini_par, mese_ini_par)[2]
+            df_prec_par = parametri_esercizio(es_prec_par)
+            if not df_prec_par.empty and st.button(f"📋 Copia i valori della stagione {es_prec_par}"):
+                with db_write() as w_conn:
+                    for r in df_prec_par.itertuples():
+                        w_conn.execute(
+                            "INSERT INTO parametri_stagione (esercizio, voce, categoria, costo_societa, quota_richiesta) VALUES (?, ?, ?, ?, ?)",
+                            [es_par, r.voce, r.categoria or "", float(r.costo_societa or 0), float(r.quota_richiesta or 0)])
+                st.session_state["flash"] = f"Valori copiati dalla stagione {es_prec_par}: controllali."
+                st.rerun()
+
+        squadre = {quote.TUTTE: "Tutte le squadre"} | {c: c.replace("_", " ").title() for c in CATEGORIE_LISTA}
+        cat_par = st.selectbox("Valori per", list(squadre), format_func=squadre.get,
+                               help="Imposta prima i valori per tutte le squadre; per una squadra con importi diversi sceglila qui e salva i suoi valori.")
+        specifici = df_par[df_par["categoria"].fillna("") == cat_par] if not df_par.empty else df_par
+        if cat_par != quote.TUTTE and specifici.empty:
+            st.info(f"{squadre[cat_par]} usa i valori di «Tutte le squadre». Salva qui sotto per impostare importi diversi.")
+
+        valori_par = {}
+        intest = st.columns([3, 2, 2])
+        intest[1].caption("Costo per la società (€)")
+        intest[2].caption("Quota richiesta alla persona (€)")
+        for codice, etichetta, per_persone in quote.VOCI:
+            if codice == "AFFILIAZIONE" and cat_par != quote.TUTTE:
+                continue
+            riga = st.columns([3, 2, 2])
+            riga[0].markdown(f"**{etichetta}**")
+            kp = f"par_{es_par}_{cat_par}_{codice}"
+            costo = riga[1].number_input("Costo", min_value=0.0, step=1.0, format="%.2f", key=kp + "_c", label_visibility="collapsed",
+                                         value=quote.valore(df_par, codice, cat_par, "costo_societa"))
+            quota_v = riga[2].number_input("Quota", min_value=0.0, step=5.0, format="%.2f", key=kp + "_q", label_visibility="collapsed",
+                                           value=quote.valore(df_par, codice, cat_par, "quota_richiesta"), disabled=not per_persone)
+            valori_par[codice] = (costo, quota_v if per_persone else 0.0)
+
+        cs1, cs2 = st.columns(2)
+        if cs1.button(f"💾 Salva valori ({squadre[cat_par]})", type="primary", key=f"par_salva_{es_par}_{cat_par}"):
+            with db_write() as w_conn:
+                for codice, (costo, quota_v) in valori_par.items():
+                    # Per una squadra si salvano solo le voci diverse da «Tutte le squadre»: le altre seguono i valori generali
+                    if cat_par != quote.TUTTE and (costo, quota_v) == (quote.valore(df_par, codice, quote.TUTTE, "costo_societa"),
+                                                                       quote.valore(df_par, codice, quote.TUTTE, "quota_richiesta")):
+                        w_conn.execute("DELETE FROM parametri_stagione WHERE esercizio = ? AND voce = ? AND categoria = ?", [es_par, codice, cat_par])
+                        continue
+                    w_conn.execute(
+                        "INSERT INTO parametri_stagione (esercizio, voce, categoria, costo_societa, quota_richiesta) VALUES (?, ?, ?, ?, ?) "
+                        "ON CONFLICT(esercizio, voce, categoria) DO UPDATE SET costo_societa = excluded.costo_societa, quota_richiesta = excluded.quota_richiesta",
+                        [es_par, codice, cat_par, float(costo), float(quota_v)])
+            st.session_state["flash"] = f"Parametri {es_par} salvati ({squadre[cat_par]})."
+            st.rerun()
+        if cat_par != quote.TUTTE and not specifici.empty and cs2.button("↩️ Usa i valori di tutte le squadre", key=f"par_reset_{es_par}_{cat_par}"):
+            with db_write() as w_conn:
+                w_conn.execute("DELETE FROM parametri_stagione WHERE esercizio = ? AND categoria = ?", [es_par, cat_par])
+            st.session_state["flash"] = f"{squadre[cat_par]} torna a usare i valori di tutte le squadre."
+            st.rerun()
+
+    df_tess_par, df_vers_par = dati_quote(ini_par, fin_par)
+
+    with tab_quote:
+        df_sit = quote.situazione_quote(df_tess_par, df_par, df_vers_par)
+        q1, q2, q3 = st.columns(3)
+        q1.metric("Quote dovute", f"€ {df_sit['Dovuto (€)'].sum():,.2f}")
+        q2.metric("Versate", f"€ {df_sit['Versato (€)'].sum():,.2f}")
+        q3.metric("Da incassare", f"€ {df_sit['Da versare (€)'].clip(lower=0).sum():,.2f}")
+        solo_da_pagare = st.checkbox("Mostra solo chi deve ancora pagare", value=False)
+        vista_sit = df_sit[df_sit["Da versare (€)"] > 0] if solo_da_pagare else df_sit
+        st.dataframe(vista_sit.drop(columns=["anagrafica_id"]), width="stretch", hide_index=True)
+        st.caption(f"Tesserati attivi. Versato = ricevute emesse dal {ini_par.strftime('%d/%m/%Y')} al {fin_par.strftime('%d/%m/%Y')} "
+                   "(escluse quelle che incassano quote degli esercizi precedenti).")
+
+    with tab_costo:
+        df_costo = quote.costo_tesseramenti(df_tess_par, df_par)
+        totale_costo = float(df_costo["Totale (€)"].sum()) if not df_costo.empty else 0.0
+        st.metric(f"Totale dovuto all'ente per la stagione {es_par}", f"€ {totale_costo:,.2f}")
+        st.dataframe(df_costo, width="stretch", hide_index=True)
+        st.caption("Calcolato sui tesserati attivi di oggi e sui costi dei parametri.")
+        gia_registrato = leggi_df(
+            """
+            SELECT COALESCE(SUM(r.dare), 0) AS tot FROM righe_prima_nota r
+            JOIN movimenti_prima_nota m ON m.id = r.movimento_id
+            JOIN piano_dei_conti p ON p.id = r.sottoconto_id
+            WHERE p.codice = '40.01.002' AND m.data_registrazione BETWEEN ? AND ?
+            """, [str(ini_par), str(fin_par)])["tot"].iloc[0]
+        st.write(f"Già registrato in prima nota nella stagione come «Tasse affiliazione e tesseramenti»: **€ {gia_registrato:,.2f}**")
+        with st.form(f"paga_tesseramenti_{es_par}", clear_on_submit=True):
+            st.markdown("**Registra un pagamento all'ente**")
+            p1, p2, p3 = st.columns(3)
+            data_pag = p1.date_input("Data pagamento", format="DD/MM/YYYY")
+            importo_pag = p2.number_input("Importo (€)", min_value=0.0, value=max(round(totale_costo - float(gia_registrato), 2), 0.0), step=10.0)
+            modo_pag = p3.selectbox("Pagato con", ["BONIFICO", "POS", "PAYPAL", "CONTANTI"])
+            if st.form_submit_button("Registra in prima nota"):
+                if importo_pag <= 0:
+                    st.error("Inserisci un importo maggiore di zero.")
+                else:
+                    try:
+                        with db_write() as w_conn:
+                            acc_costo = get_conto_id(w_conn, "40.01.002")
+                            acc_fin = get_conto_id(w_conn, {"BONIFICO": "10.01.001", "POS": "10.01.001", "PAYPAL": "10.01.003"}.get(modo_pag, "10.01.002"))
+                            post_journal(w_conn, data_pag, f"Tesseramenti {es_par}", f"Pagamento affiliazione e tesseramenti stagione {es_par}", "ISTITUZIONALE",
+                                         [(acc_costo, "Affiliazione e tesseramenti", float(importo_pag), 0.0),
+                                          (acc_fin, "Pagamento all'ente", 0.0, float(importo_pag))])
+                        st.session_state["flash"] = f"Pagamento di € {importo_pag:,.2f} registrato in prima nota."
+                        st.rerun()
+                    except Exception as ex_pag:
+                        st.error(f"Errore nella registrazione: {ex_pag}")
+
 elif menu == "Distinte di Gara":
     st.subheader("📋 Distinte di Gara")
 
@@ -1049,7 +1206,7 @@ elif menu == "Distinte di Gara":
         df_pers = leggi_df(
             """
             SELECT a.id, a.denominazione, a.codice_fiscale, a.tipo_documento, a.numero_documento,
-                   t.numero_tessera, t.numero_scheda_attivita, t.tipo_tessera, t.numero_maglia, t.gioca,
+                   t.numero_tessera, t.numero_scheda_attivita, t.tipo_tessera, t.numero_maglia, t.gioca, t.socio_altra_societa,
                    c.data_scadenza, c.stato_idoneita
             FROM tesserati_calcio t
             JOIN anagrafiche a ON a.id = t.anagrafica_id
@@ -1128,7 +1285,7 @@ elif menu == "Distinte di Gara":
                 numero = p.get("numero_scheda_attivita") or p.get("numero_tessera")
                 tipo_def = sal.get("tipo_tessera") or ("A" if p.get("numero_scheda_attivita") else (p.get("tipo_tessera") or "A"))
                 cols = st.columns([3, 1, 1, 1, 1.2, 2])
-                cols[0].markdown(f"**{p['denominazione']}**  \n{'scheda attività' if p.get('numero_scheda_attivita') else 'tessera'} {numero}")
+                cols[0].markdown(f"**{p['denominazione']}**  \n{'scheda attività' if p.get('numero_scheda_attivita') or p.get('socio_altra_societa') else 'tessera'} {numero}")
                 # Proposta: numero della distinta salvata, altrimenti la maglia abituale del tesserato (0 = da assegnare)
                 maglia = cols[1].number_input("Maglia", 0, 99, int(sal.get("numero_maglia") or p.get("numero_maglia") or 0), key=f"{k}m{pid}", label_visibility="collapsed")
                 opz_cap = ["—", "C", "VC"]
@@ -1359,7 +1516,12 @@ elif menu == "Ricevute Istituzionali (Art. 4)":
                 help="La ricevuta riduce il credito verso il socio invece di registrare un nuovo ricavo, che è già stato contato nell'esercizio in cui la quota era dovuta.")
 
             if st.form_submit_button("Emetti Ricevuta e Registra in Prima Nota"):
-                if importo > 0:
+                socio_altrove_ric = leggi_df("SELECT COALESCE(MAX(socio_altra_societa), 0) AS s FROM tesserati_calcio WHERE anagrafica_id = ?",
+                                             [int(soci_dict[socio_sel])])["s"].iloc[0]
+                if socio_altrove_ric and "Associativa" in tipo_causale:
+                    st.error("Questa persona è socia di un'altra società e qui ha solo la scheda attività: non può versare la quota associativa. "
+                             "Scegli «Quota Iscrizione e Frequenza Campionato».")
+                elif importo > 0:
                     causale_completa = f"{tipo_causale} - {causale_custom}"
                     bollo = 2.00 if importo > 77.47 else 0.00
                     # BONIFICO e POS vanno in banca, PAYPAL sul conto PayPal, CONTANTI in cassa
@@ -1403,6 +1565,13 @@ elif menu == "Ricevute Istituzionali (Art. 4)":
         st.info("Nessun socio presente in anagrafica. Registra un nuovo socio per emettere le ricevute.")
 
     ini_ec, fin_ec, etich_ec = esercizio_corrente()
+    df_tess_ric, df_vers_ric = dati_quote(ini_ec, fin_ec)
+    df_sit_ric = quote.situazione_quote(df_tess_ric, parametri_esercizio(etich_ec), df_vers_ric)
+    da_pagare = df_sit_ric[df_sit_ric["Da versare (€)"] > 0]
+    if not da_pagare.empty:
+        with st.expander(f"📋 Quote della stagione {etich_ec} ancora da versare: {len(da_pagare)} persone, € {da_pagare['Da versare (€)'].sum():,.2f}"):
+            st.dataframe(da_pagare.drop(columns=["anagrafica_id"]), width="stretch", hide_index=True)
+            st.caption("Importi dai Parametri Stagione (o dalla quota personalizzata della persona), meno le ricevute emesse nell'esercizio.")
     df_res_soci = crediti_residui(etich_ec, ini_ec, fin_ec, "SOCIO")
     if not df_res_soci.empty:
         with st.expander(f"💰 Quote degli esercizi precedenti da incassare (esercizio {etich_ec}): € {df_res_soci['residuo'].clip(lower=0).sum():,.2f}"):

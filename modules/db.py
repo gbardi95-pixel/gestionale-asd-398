@@ -426,6 +426,25 @@ def init_db():
     );
     """)
 
+    # 17. Parametri della stagione: costo di ogni tesseramento per la società e quota chiesta alle persone,
+    # per tutte le squadre (categoria vuota) o per una squadra specifica
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS parametri_stagione (
+        esercizio TEXT NOT NULL,
+        voce TEXT NOT NULL,
+        categoria TEXT NOT NULL DEFAULT '',
+        costo_societa REAL DEFAULT 0.00,
+        quota_richiesta REAL DEFAULT 0.00,
+        PRIMARY KEY (esercizio, voce, categoria)
+    );
+    """)
+
+    # Migrazione: socio di un'altra società, qui tesserato solo con la scheda attività
+    try:
+        cursor.execute("ALTER TABLE tesserati_calcio ADD COLUMN socio_altra_societa INTEGER NOT NULL DEFAULT 0;")
+    except Exception:
+        pass  # colonna già presente
+
     # Migrazione: ricevuta che incassa un credito degli esercizi precedenti (non è un nuovo ricavo)
     try:
         cursor.execute("ALTER TABLE ricevute_istituzionali ADD COLUMN credito_pregresso INTEGER NOT NULL DEFAULT 0;")
