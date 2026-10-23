@@ -270,6 +270,6 @@ def applica_piano(conn, piano, opzioni, inattivare_ids=(), categoria_nuovi="PRIM
                 [p["anagrafica_id"], u["scad_cert"], nota_cert]
             )
         if "riattiva" in azioni:
-            conn.execute("UPDATE tesserati_calcio SET stato = 'ATTIVO' WHERE id = ?", [p["tesserato_id"]])
+            conn.execute("UPDATE tesserati_calcio SET stato = 'ATTIVO', data_uscita = NULL WHERE id = ?", [p["tesserato_id"]])
     for tid in inattivare_ids:
-        conn.execute("UPDATE tesserati_calcio SET stato = 'INATTIVO' WHERE id = ?", [int(tid)])
+        conn.execute("UPDATE tesserati_calcio SET stato = 'INATTIVO', data_uscita = COALESCE(data_uscita, date('now')) WHERE id = ?", [int(tid)])

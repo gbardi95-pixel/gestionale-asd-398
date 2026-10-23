@@ -102,15 +102,18 @@ def _cella_sicura(valore):
     return valore
 
 
-def _scrivi(writer, nome_foglio, df):
+def scrivi_foglio(writer, nome_foglio, df, riga_titolo=None):
+    """Scrive il foglio con colonne già larghe quanto il contenuto e intestazione bloccata; il titolo facoltativo va nella prima riga."""
     df = df.map(_cella_sicura) if not df.empty else df
-    df.to_excel(writer, index=False, sheet_name=nome_foglio[:31])
+    riga_intestazione = 2 if riga_titolo else 0
+    df.to_excel(writer, index=False, sheet_name=nome_foglio[:31], startrow=riga_intestazione)
     foglio = writer.sheets[nome_foglio[:31]]
-    # Larghezza delle colonne in base al contenuto, per aprire il file già leggibile
+    if riga_titolo:
+        foglio.cell(row=1, column=1, value=_cella_sicura(riga_titolo)).font = foglio.cell(row=1, column=1).font.copy(bold=True, size=13)
     for i, colonna in enumerate(df.columns, start=1):
         lunghezze = [len(str(colonna))] + [len(str(v)) for v in df[colonna].head(200)]
         foglio.column_dimensions[foglio.cell(row=1, column=i).column_letter].width = min(max(lunghezze) + 2, 60)
-    foglio.freeze_panes = "A2"
+    foglio.freeze_panes = f"A{riga_intestazione + 2}"
 
 
 def elenco_tabelle(conn):
@@ -132,9 +135,9 @@ def backup_completo(conn, versione_schema):
         info = pd.DataFrame(
             [{"Tabella": "Creato il", "Righe": datetime.datetime.now().strftime("%d/%m/%Y %H:%M")},
              {"Tabella": "Versione dello schema", "Righe": versione_schema}] + conteggi)
-        _scrivi(writer, "Info", info)
+        scrivi_foglio(writer, "Info", info)
         for t in tabelle:
-            _scrivi(writer, t, dati[t])
+            scrivi_foglio(writer, t, dati[t])
     return buffer.getvalue(), conteggi
 
 
@@ -148,7 +151,7 @@ def esportazione_esercizio(conn, inizio, fine, etichetta):
         info = pd.DataFrame([{"Foglio": "Esercizio", "Righe": etichetta},
                              {"Foglio": "Periodo", "Righe": f"{inizio.strftime('%d/%m/%Y')} - {fine.strftime('%d/%m/%Y')}"},
                              {"Foglio": "Creato il", "Righe": datetime.datetime.now().strftime("%d/%m/%Y %H:%M")}] + conteggi)
-        _scrivi(writer, "Info", info)
+        scrivi_foglio(writer, "Info", info)
         for nome, df in fogli.items():
-            _scrivi(writer, nome, df)
+            scrivi_foglio(writer, nome, df)
     return buffer.getvalue(), conteggi

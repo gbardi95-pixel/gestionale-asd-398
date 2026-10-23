@@ -459,6 +459,8 @@ def init_db():
         "ALTER TABLE anagrafiche ADD COLUMN numero_documento TEXT;",
         "ALTER TABLE tesserati_calcio ADD COLUMN tipo_tessera TEXT;",
         "ALTER TABLE tesserati_calcio ADD COLUMN numero_maglia INTEGER;",
+        # Libro soci: data in cui la persona ha smesso di essere socia (stato INATTIVO)
+        "ALTER TABLE tesserati_calcio ADD COLUMN data_uscita TEXT;",
     ):
         try:
             cursor.execute(alter_sql)

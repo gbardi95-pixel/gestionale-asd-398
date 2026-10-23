@@ -8,7 +8,7 @@ import warnings
 import pandas as pd
 import streamlit as st
 from contextlib import contextmanager
-from modules import backup, distinte, esercizio, quote, tesseramento
+from modules import backup, distinte, esercizio, libro_soci, quote, tesseramento
 from modules.db import PIANO_DEI_CONTI_ASD, get_connection, init_db, usa_turso
 
 # ---------------------------------------------------------
@@ -16,7 +16,7 @@ from modules.db import PIANO_DEI_CONTI_ASD, get_connection, init_db, usa_turso
 # ---------------------------------------------------------
 # Incrementare a ogni modifica dello schema del DB: forza init_db() (e le migrazioni)
 # anche quando Streamlit Cloud aggiorna il codice senza riavviare il server.
-VERSIONE_SCHEMA_DB = 8
+VERSIONE_SCHEMA_DB = 9
 
 @st.cache_resource
 def _setup_database(versione_schema):
@@ -555,10 +555,11 @@ def pagina_dashboard():
 def pagina_soci():
     st.subheader("🏃 Gestione Anagrafiche: Soci, Dirigenza e Atleti")
 
-    tab_list, tab_add, tab_edit = st.tabs([
+    tab_list, tab_add, tab_edit, tab_libro = st.tabs([
         "📋 Elenco Anagrafiche & Filtri",
         "➕ Inserimento & Importazione",
-        "✏️ Modifica / Elimina Scheda"
+        "✏️ Modifica / Elimina Scheda",
+        "📒 Libro soci"
     ])
 
     RUOLI_LISTA = ["Presidente", "Vice Presidente", "Consigliere", "Dirigente", "Dirigente Accompagnatore", "Segretario", "Allenatore", "Portiere", "Difensore", "Centrocampista", "Attaccante", "Socio"]
@@ -870,7 +871,8 @@ def pagina_soci():
 
             df_a = leggi_df("SELECT denominazione, codice_fiscale, tipo_documento, numero_documento FROM anagrafiche WHERE id = ?", [selected_anag_id])
             df_t = leggi_df(
-                "SELECT numero_tessera, numero_scheda_attivita, tipo_tessera, numero_maglia, categoria, ruolo, quota_stagionale, stato, gioca, socio_altra_societa "
+                "SELECT numero_tessera, numero_scheda_attivita, tipo_tessera, numero_maglia, categoria, ruolo, quota_stagionale, stato, gioca, socio_altra_societa, "
+                "data_tesseramento, data_uscita "
                 "FROM tesserati_calcio WHERE anagrafica_id = ?", [selected_anag_id])
             df_c = leggi_df("SELECT data_rilascio, data_scadenza, medico_certificatore FROM certificati_medici WHERE anagrafica_id = ? ORDER BY data_scadenza DESC", [selected_anag_id])
 
@@ -891,6 +893,8 @@ def pagina_soci():
             cur_stato = first_val(df_t, "stato", "ATTIVO")
             cur_gioca = bool(int(first_val(df_t, "gioca", 1)))
             cur_socio_altrove = bool(int(first_val(df_t, "socio_altra_societa", 0) or 0))
+            cur_ammissione = libro_soci.data_iso(first_val(df_t, "data_tesseramento"))
+            cur_uscita = libro_soci.data_iso(first_val(df_t, "data_uscita"))
 
             has_cert = not df_c.empty
             cur_ril = first_val(df_c, "data_rilascio")
@@ -924,6 +928,12 @@ def pagina_soci():
                 d_col1, d_col2 = st.columns(2)
                 e_tipo_doc = d_col1.text_input("Documento d'identità (es. CIE, C.I., PT)", value=cur_tipo_doc)
                 e_num_doc = d_col2.text_input("N° documento d'identità", value=cur_num_doc)
+                s_col1, s_col2 = st.columns(2)
+                e_ammissione = s_col1.date_input("Data di ammissione a socio", value=cur_ammissione, format="DD/MM/YYYY",
+                                                 help="Per il libro soci. Nuove schede: se vuota si usa la data di oggi.")
+                e_uscita = s_col2.date_input("Data di uscita (solo se INATTIVO)", value=cur_uscita, format="DD/MM/YYYY",
+                                             help="Per il libro soci. Chi passa ora a INATTIVO senza data riceve la data di oggi; "
+                                                  "con stato ATTIVO o IN PRESTITO la data viene tolta.")
                 e_gioca = st.checkbox("⚽ Gioca / svolge attività sportiva (certificato medico obbligatorio)", value=cur_gioca)
                 e_socio_altrove = st.checkbox("Socio di un'altra società: qui ha solo la scheda attività", value=cur_socio_altrove, help="Il numero di tessera inserito è quello della scheda attività. Non è socio di questa società: non paga la quota associativa.")
 
@@ -950,6 +960,16 @@ def pagina_soci():
                     if e_data_ril and e_data_scad and e_data_scad <= e_data_ril:
                         st.error("La data di scadenza del certificato deve essere successiva alla data di rilascio.")
                         st.stop()
+                    # La data di oggi si mette solo a chi diventa INATTIVO adesso: per chi lo era già non si sa quando è uscito
+                    uscita_salva = None
+                    if e_stato == "INATTIVO":
+                        if e_uscita:
+                            uscita_salva = e_uscita.isoformat()
+                        elif cur_stato != "INATTIVO":
+                            uscita_salva = datetime.date.today().isoformat()
+                    if e_ammissione and uscita_salva and uscita_salva < e_ammissione.isoformat():
+                        st.error("La data di uscita non può essere precedente alla data di ammissione.")
+                        st.stop()
                     try:
                         with db_write() as w_conn:
                             w_conn.execute(
@@ -960,16 +980,18 @@ def pagina_soci():
                             if has_tess:
                                 w_conn.execute(
                                     "UPDATE tesserati_calcio SET numero_tessera = ?, numero_scheda_attivita = ?, tipo_tessera = ?, numero_maglia = ?, categoria = ?, ruolo = ?, "
-                                    "quota_stagionale = ?, stato = ?, gioca = ?, socio_altra_societa = ? WHERE anagrafica_id = ?",
+                                    "quota_stagionale = ?, stato = ?, gioca = ?, socio_altra_societa = ?, data_tesseramento = ?, data_uscita = ? WHERE anagrafica_id = ?",
                                     [str(e_matricola).strip(), str(e_scheda).strip(), str(e_tipo_tess).strip() or None, int(e_maglia) or None, str(e_categoria),
-                                     str(e_ruolo), float(e_quota), str(e_stato), int(e_gioca), int(e_socio_altrove), int(selected_anag_id)]
+                                     str(e_ruolo), float(e_quota), str(e_stato), int(e_gioca), int(e_socio_altrove),
+                                     e_ammissione.isoformat() if e_ammissione else None, uscita_salva, int(selected_anag_id)]
                                 )
                             else:
                                 w_conn.execute(
                                     "INSERT INTO tesserati_calcio (anagrafica_id, numero_tessera, numero_scheda_attivita, tipo_tessera, numero_maglia, categoria, ruolo, "
-                                    "data_tesseramento, quota_stagionale, stato, gioca, socio_altra_societa) VALUES (?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%d', 'now'), ?, ?, ?, ?)",
+                                    "data_tesseramento, quota_stagionale, stato, gioca, socio_altra_societa, data_uscita) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                                     [int(selected_anag_id), str(e_matricola).strip(), str(e_scheda).strip(), str(e_tipo_tess).strip() or None, int(e_maglia) or None,
-                                     str(e_categoria), str(e_ruolo), float(e_quota), str(e_stato), int(e_gioca), int(e_socio_altrove)]
+                                     str(e_categoria), str(e_ruolo), (e_ammissione or datetime.date.today()).isoformat(), float(e_quota), str(e_stato),
+                                     int(e_gioca), int(e_socio_altrove), uscita_salva]
                                 )
 
                             if e_data_scad:
@@ -1021,6 +1043,35 @@ def pagina_soci():
                             st.error(f"Errore durante l'eliminazione: {ex_del}")
         else:
             st.info("Nessuna anagrafica presente da modificare.")
+
+    with tab_libro:
+        st.markdown("#### 📒 Libro soci")
+        st.caption("Chi ha una tessera di questa società nell'esercizio scelto. Restano fuori chi è socio di un'altra società "
+                   "e chi ha solo la scheda attività. Le date di ammissione e di uscita si correggono nella scheda della persona.")
+        mese_ini_ls = mese_inizio_esercizio()
+        oggi_ls = datetime.date.today().replace(day=1)
+        periodi_ls = {}
+        for anni_fa in range(0, 5):
+            ini_l, fin_l, etich_l = esercizio.periodo_esercizio(oggi_ls.replace(year=oggi_ls.year - anni_fa), mese_ini_ls)
+            periodi_ls.setdefault(etich_l, (ini_l, fin_l))
+        es_ls = st.selectbox("Esercizio", list(periodi_ls), key="libro_esercizio")
+        ini_ls, fin_ls = periodi_ls[es_ls]
+        df_versato_ls = leggi_df(
+            "SELECT anagrafica_id, SUM(importo) AS versato FROM ricevute_istituzionali WHERE data_emissione BETWEEN ? AND ? GROUP BY anagrafica_id",
+            [str(ini_ls), str(fin_ls)])
+        df_libro = libro_soci.elenco(leggi_df(libro_soci.SQL_SOCI), df_versato_ls, ini_ls, fin_ls)
+        l1, l2, l3 = st.columns(3)
+        l1.metric("Soci nell'esercizio", len(df_libro))
+        l2.metric("Usciti nell'esercizio", int((df_libro["Data di uscita"] != "").sum()))
+        l3.metric("Senza data di ammissione", int((df_libro["Data di ammissione"] == "da completare").sum()))
+        st.dataframe(df_libro, width="stretch", hide_index=True)
+        senza_uscita = leggi_df(libro_soci.SQL_SOCI + " AND t.stato = 'INATTIVO' AND t.data_uscita IS NULL ORDER BY a.denominazione")
+        if not senza_uscita.empty:
+            st.warning(f"{len(senza_uscita)} soci INATTIVI senza data di uscita non compaiono nel libro: indicala nella loro scheda. "
+                       + ", ".join(senza_uscita["denominazione"]))
+        st.download_button("📥 Scarica il libro soci (.xlsx)", libro_soci.excel(df_libro, NOME_SOCIETA, es_ls, ini_ls, fin_ls),
+                           file_name=f"libro_soci_{es_ls.replace('/', '-')}.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 # ---------------------------------------------------------
 # 3. RICEVUTE ISTITUZIONALI (ART. 4 DPR 633/72)
