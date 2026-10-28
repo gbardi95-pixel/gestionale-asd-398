@@ -21,3 +21,6 @@ __pycache__/
 # Documenti Word locali (modelli con dati della società); il modello generico in modelli/ resta nel repository
 *.docx
 !modelli/*.docx
+
+# Documenti contabili e dati della società: restano solo in locale
+*.pdf

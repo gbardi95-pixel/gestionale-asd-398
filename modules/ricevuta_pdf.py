@@ -95,10 +95,14 @@ def genera(societa, ricevuta):
 
     versante = ricevuta.get("versante") or ricevuta["praticante"]
     versante_cf = ricevuta.get("versante_cf") or ricevuta.get("praticante_cf") or "da completare"
-    righe = [
-        ["Ricevuto da", f"{versante}\nC.F. {versante_cf}"],
-        ["Per l'attività sportiva di", f"{ricevuta['praticante']}\nC.F. {ricevuta.get('praticante_cf') or 'da completare'}"],
-        ["Attività sportiva", societa.get("attivita") or "da completare"],
+    erogazione = str(ricevuta["causale"]).startswith("Erogazione Liberale")
+    righe = [["Ricevuto da", f"{versante}\nC.F. {versante_cf}"]]
+    if not erogazione:
+        righe += [
+            ["Per l'attività sportiva di", f"{ricevuta['praticante']}\nC.F. {ricevuta.get('praticante_cf') or 'da completare'}"],
+            ["Attività sportiva", societa.get("attivita") or "da completare"],
+        ]
+    righe += [
         ["Causale", ricevuta["causale"]],
         ["Importo", f"{euro(ricevuta['importo'])}  (euro {importo_in_lettere(ricevuta['importo'])})"],
         ["Pagamento", ricevuta["pagamento"].capitalize()],
@@ -119,8 +123,12 @@ def genera(societa, ricevuta):
         note.append(f"Imposta di bollo di {euro(ricevuta['bollo'])} applicata sull'originale.")
     else:
         note.append(NOTA_ESENZIONE_BOLLO)
+    if erogazione:
+        note.append("Erogazione liberale in denaro, effettuata senza alcun corrispettivo, a sostegno dell'attività istituzionale dell'associazione.")
     if ricevuta["pagamento"].upper() not in TRACCIABILI:
-        note.append("Pagamento in contanti: non valido per la detrazione delle spese sportive, che richiede un pagamento tracciabile.")
+        note.append("Pagamento in contanti: non valido per la detrazione, che richiede un pagamento tracciabile."
+                    if erogazione else
+                    "Pagamento in contanti: non valido per la detrazione delle spese sportive, che richiede un pagamento tracciabile.")
     for n in note:
         storia.append(Paragraph(n, piccolo))
     storia.append(Spacer(1, 40))

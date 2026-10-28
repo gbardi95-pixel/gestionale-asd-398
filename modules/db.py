@@ -42,18 +42,31 @@ PIANO_DEI_CONTI_ASD = [
     ('40.01.005', 'Spese Sanitarie e Visite Mediche', 'COSTO', 3),
     ('40.01.006', 'Iscrizione Campionati, Multe e Sanzioni Sportive', 'COSTO', 3),
     ('40.01.007', 'Contributi INPS a Carico della Società', 'COSTO', 3),
+    ('40.01.008', 'Spese per Attività Associativa', 'COSTO', 3),
     ('40.02', 'Costi Generali e Amministrativi', 'COSTO', 2),
     ('40.02.001', 'Consulenze Amministrative e Fiscali', 'COSTO', 3),
     ('40.02.002', 'Utenze e Manutenzioni Impianti', 'COSTO', 3),
+    ('40.02.003', 'Oneri Bancari e Commissioni', 'COSTO', 3),
+    ('40.02.004', 'Imposte, Tasse e Bolli', 'COSTO', 3),
+    ('40.02.005', 'Spese per Servizi', 'COSTO', 3),
+    ('40.03', 'Oneri Diversi e Straordinari', 'COSTO', 2),
+    ('40.03.001', 'Sopravvenienze Passive', 'COSTO', 3),
+    ('40.03.002', 'Rimborso Finanziamenti Soci', 'COSTO', 3),
 
     # 50. RICAVI
     ('50', 'RICAVI ED ENTRATE ASD', 'RICAVO', 1),
     ('50.01', 'Entrate Istituzionali (Art. 4 DPR 633/72)', 'RICAVO', 2),
     ('50.01.001', 'Quote Associative Annue', 'RICAVO', 3),
     ('50.01.002', 'Quote Iscrizione e Frequenza Calciatori', 'RICAVO', 3),
+    ('50.01.003', 'Erogazioni Liberali', 'RICAVO', 3),
     ('50.02', 'Entrate Commerciali (Regime 398/91)', 'RICAVO', 2),
     ('50.02.001', 'Ricavi per Sponsorizzazioni e Pubblicità', 'RICAVO', 3),
     ('50.02.002', 'Contributi da Enti e Associazioni', 'RICAVO', 3),
+    ('50.02.003', 'Altri Ricavi Commerciali', 'RICAVO', 3),
+    ('50.03', 'Proventi Diversi e Straordinari', 'RICAVO', 2),
+    ('50.03.001', 'Sopravvenienze Attive', 'RICAVO', 3),
+    ('50.03.002', 'Altri Ricavi e Proventi', 'RICAVO', 3),
+    ('50.03.003', 'Entrate da Finanziamenti Soci', 'RICAVO', 3),
 ]
 
 
@@ -526,6 +539,34 @@ def init_db(versione_schema=None):
         PRIMARY KEY (evento_id, anagrafica_id)
     );
     """)
+
+    # 20. Utenti con accesso personale (password cifrate) e registro delle attività
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS utenti (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        nome_utente TEXT NOT NULL UNIQUE,
+        nome TEXT NOT NULL,
+        ruolo TEXT NOT NULL CHECK(ruolo IN ('ADMIN', 'SEGRETERIA', 'ALLENATORE', 'CONSULTAZIONE')),
+        squadre TEXT,
+        password_hash TEXT NOT NULL,
+        cambio_password INTEGER NOT NULL DEFAULT 1,
+        attivo INTEGER NOT NULL DEFAULT 1,
+        tentativi_falliti INTEGER NOT NULL DEFAULT 0,
+        bloccato_fino TEXT,
+        ultimo_accesso TEXT,
+        creato_il TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+    """)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS registro_attivita (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        quando TEXT NOT NULL,
+        utente TEXT NOT NULL,
+        pagina TEXT,
+        azione TEXT NOT NULL
+    );
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_registro_quando ON registro_attivita(quando);")
 
     # Migrazione: socio di un'altra società, qui tesserato solo con la scheda attività
     try:

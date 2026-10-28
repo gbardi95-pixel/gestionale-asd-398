@@ -10,7 +10,7 @@ import warnings
 import pandas as pd
 import streamlit as st
 from contextlib import contextmanager
-from modules import backup, distinte, esercizio, lavoro_sportivo, libro_soci, preventivo, quote, rendiconto_pdf, ricevuta_pdf, solleciti, squadra, tesseramento
+from modules import backup, distinte, esercizio, lavoro_sportivo, libro_soci, preventivo, quote, rendiconto_pdf, ricevuta_pdf, solleciti, squadra, tesseramento, utenti
 from modules import cap as cap_comuni
 from modules.db import PIANO_DEI_CONTI_ASD, _turso_credentials, connessione_replica, get_connection, init_db, usa_turso, versione_schema_db
 
@@ -19,7 +19,7 @@ from modules.db import PIANO_DEI_CONTI_ASD, _turso_credentials, connessione_repl
 # ---------------------------------------------------------
 # Incrementare a ogni modifica dello schema del DB: forza init_db() (e le migrazioni)
 # anche quando Streamlit Cloud aggiorna il codice senza riavviare il server.
-VERSIONE_SCHEMA_DB = 12
+VERSIONE_SCHEMA_DB = 13
 
 @st.cache_resource(show_spinner="Avvio dell'app…")
 def _setup_database(versione_schema):
@@ -51,54 +51,125 @@ except Exception:
 st.set_page_config(page_title=APP_TITLE, layout="wide", page_icon="⚽")
 
 # ---------------------------------------------------------
-# ACCESSO CON PASSWORD (APP_PASSWORD nei Secrets di Streamlit)
+# ACCESSO: utenti personali (pagina «Utenti e registro») oppure password generale
+# APP_PASSWORD dei Secrets, che resta l'accesso d'emergenza dell'amministratore
 # ---------------------------------------------------------
-def _verifica_accesso():
-    try:
-        password_attesa = st.secrets.get("APP_PASSWORD")
-    except Exception:
-        password_attesa = None
-    password_attesa = password_attesa or os.environ.get("APP_PASSWORD")
+ACCESSO_GENERALE = {"id": None, "nome_utente": "", "nome": "Amministratore (password generale)", "ruolo": "ADMIN",
+                    "squadre": [], "cambio_password": False}
 
-    if not password_attesa:
+# Accessi personali con ruoli: si attivano scrivendo ACCESSI_PERSONALI = true nei Secrets.
+# Finché sono spenti resta la password unica e il registro attività annota cosa viene fatto, non chi lo fa.
+try:
+    ACCESSI_PERSONALI = str(st.secrets.get("ACCESSI_PERSONALI", "")).strip().lower() in ("1", "true", "si", "sì")
+except Exception:
+    ACCESSI_PERSONALI = False
+
+def _password_generale():
+    try:
+        password = st.secrets.get("APP_PASSWORD")
+    except Exception:
+        password = None
+    return password or os.environ.get("APP_PASSWORD")
+
+def utente_corrente():
+    return (st.session_state.get("utente") if ACCESSI_PERSONALI else None) or ACCESSO_GENERALE
+
+def etichetta_utente(utente):
+    return f"{utente['nome']} ({utente['nome_utente']})" if utente.get("nome_utente") else utente["nome"]
+
+def pagina_corrente():
+    p = globals().get("pagina")
+    return getattr(p, "title", "") if p is not None else ""
+
+def scrivi_accesso(operazione):
+    """Scritture legate all'accesso (tentativi, cambio password): valgono anche per i profili di sola consultazione."""
+    conn = get_connection()
+    try:
+        risultato = operazione(conn)
+        conn.commit()
+        return risultato
+    finally:
+        conn.close()
+
+def _cambia_password(utente, nuova):
+    def scrivi(conn):
+        conn.execute("UPDATE utenti SET password_hash = ?, cambio_password = 0 WHERE id = ?", [utenti.cifra_password(nuova), utente["id"]])
+        utenti.annota(conn, etichetta_utente(utente), "Accesso", "password cambiata")
+    scrivi_accesso(scrivi)
+
+def _accesso_generale(chiave):
+    with st.form(chiave):
+        pwd = st.text_input("Password generale" if ACCESSI_PERSONALI else "Password", type="password")
+        if st.form_submit_button("Entra"):
+            corretta = hmac.compare_digest(pwd.encode("utf-8"), str(_password_generale()).encode("utf-8"))
+            scrivi_accesso(lambda c: utenti.annota(c, ACCESSO_GENERALE["nome"], "Accesso",
+                                                   "accesso con la password generale" if corretta else "password generale errata"))
+            if corretta:
+                st.session_state["autenticato"] = True
+                st.session_state.pop("utente", None)
+                st.rerun()
+            time.sleep(1)  # rallenta i tentativi a caso
+            st.error("Password errata.")
+
+def _verifica_accesso():
+    if not _password_generale():
         st.error("🔒 Accesso bloccato: imposta APP_PASSWORD nei Secrets dell'app su Streamlit.")
         st.stop()
 
-    if st.session_state.get("autenticato"):
-        return
+    if not st.session_state.get("autenticato"):
+        st.title(f"⚽ {APP_TITLE}")
+        if not ACCESSI_PERSONALI:
+            _accesso_generale("login_generale")
+        elif int(leggi_df("SELECT COUNT(*) AS n FROM utenti WHERE attivo = 1")["n"].iloc[0]) == 0:
+            st.info("Non ci sono ancora utenti personali: entra con la password generale e creali dalla pagina «Utenti e registro».")
+            _accesso_generale("login_generale")
+        else:
+            with st.form("login"):
+                nome_ut = st.text_input("Nome utente")
+                pwd = st.text_input("Password", type="password")
+                if st.form_submit_button("Entra", type="primary"):
+                    def prova(conn):
+                        esito = utenti.verifica_accesso(conn, nome_ut, pwd)
+                        utenti.annota(conn, nome_ut.strip().lower() or "?", "Accesso", "accesso" if esito[0] else "accesso non riuscito")
+                        return esito
+                    utente, errore = scrivi_accesso(prova)
+                    if utente:
+                        st.session_state["autenticato"] = True
+                        st.session_state["utente"] = utente
+                        st.rerun()
+                    time.sleep(1)
+                    st.error(errore)
+            with st.expander("Accesso d'emergenza dell'amministratore"):
+                st.caption("Con la password generale dei Secrets di Streamlit, se gli accessi personali non funzionano.")
+                _accesso_generale("login_emergenza")
+        st.stop()
 
-    st.title(f"⚽ {APP_TITLE}")
-    with st.form("login"):
-        pwd = st.text_input("Password", type="password")
-        if st.form_submit_button("Entra"):
-            if hmac.compare_digest(pwd.encode("utf-8"), str(password_attesa).encode("utf-8")):
-                st.session_state["autenticato"] = True
-                st.rerun()
-            else:
-                st.error("Password errata.")
-    st.stop()
-
-_verifica_accesso()
-
-if st.sidebar.button("🚪 Esci"):
-    st.session_state.pop("autenticato", None)
-    st.rerun()
-
-if st.sidebar.button("🔄 Ricarica dati", help="Rilegge i dati dal database (utile se sono stati modificati da un altro dispositivo)."):
-    sincronizza_letture()
-    st.cache_data.clear()
-    st.rerun()
-
-if not usa_turso():
-    st.sidebar.warning("⚠️ Turso non configurato: stai usando un database LOCALE di prova.")
-
-# Gestione Notifiche Flash
-if "flash" in st.session_state:
-    st.success(st.session_state.pop("flash"))
-if "flash_error" in st.session_state:
-    st.error(st.session_state.pop("flash_error"))
-
-st.title(f"⚽ {APP_TITLE}")
+    utente = st.session_state.get("utente")
+    if utente and ACCESSI_PERSONALI:
+        # Ruolo, squadre e disattivazione decisi dall'amministratore valgono subito, anche a chi è già dentro
+        df_ut = leggi_df("SELECT nome, ruolo, squadre, attivo FROM utenti WHERE id = ?", [utente["id"]])
+        if df_ut.empty or not int(df_ut["attivo"].iloc[0]):
+            for chiave in ("autenticato", "utente"):
+                st.session_state.pop(chiave, None)
+            st.rerun()
+        utente.update(nome=df_ut["nome"].iloc[0], ruolo=df_ut["ruolo"].iloc[0], squadre=utenti.squadre_da_testo(df_ut["squadre"].iloc[0]))
+        if utente.get("cambio_password"):
+            st.title(f"⚽ {APP_TITLE}")
+            st.subheader(f"Benvenuto, {utente['nome']}")
+            st.info("Al primo accesso, o dopo che l'amministratore ha generato una password provvisoria, scegli la tua password personale.")
+            with st.form("primo_accesso"):
+                nuova = st.text_input("Nuova password", type="password", help=f"Almeno {utenti.LUNGHEZZA_MINIMA} caratteri.")
+                ripeti = st.text_input("Ripeti la nuova password", type="password")
+                if st.form_submit_button("Salva la password", type="primary"):
+                    problema = utenti.problema_password(nuova) or (None if nuova == ripeti else "Le due password non coincidono.")
+                    if problema:
+                        st.error(problema)
+                    else:
+                        _cambia_password(utente, nuova)
+                        utente["cambio_password"] = False
+                        st.session_state["flash"] = "Password salvata."
+                        st.rerun()
+            st.stop()
 
 # Squadre / inquadramenti: allineati ai valori ammessi dal vincolo CHECK del database
 CATEGORIE_LISTA = ["STAFF", "PRIMA_SQUADRA", "JUNIORES", "ALLIEVI", "GIOVANISSIMI", "SCUOLA_CALCIO"]
@@ -108,14 +179,24 @@ CATEGORIE_LISTA = ["STAFF", "PRIMA_SQUADRA", "JUNIORES", "ALLIEVI", "GIOVANISSIM
 # ---------------------------------------------------------
 @contextmanager
 def db_write():
-    """Context manager per transazioni di scrittura compatibile con SQLite e Turso/libsql."""
+    """Context manager per transazioni di scrittura compatibile con SQLite e Turso/libsql.
+
+    Ogni salvataggio finisce nel registro attività con l'utente, la pagina e le tabelle modificate.
+    """
+    utente = utente_corrente()
+    if not utenti.puo_scrivere(utente["ruolo"]):
+        st.error("Il tuo profilo è di sola consultazione: le modifiche non vengono salvate.")
+        st.stop()
     conn = get_connection()
+    registrata = utenti.ConnessioneRegistrata(conn)
     try:
         try:
             conn.execute("PRAGMA foreign_keys = ON;")
         except Exception:
             pass
-        yield conn
+        yield registrata
+        if registrata.operazioni:
+            utenti.annota(conn, etichetta_utente(utente), pagina_corrente(), utenti.riassunto_operazioni(registrata.operazioni))
         conn.commit()
         sincronizza_letture()  # la copia locale per le letture riceve subito la modifica
         st.cache_data.clear()  # i dati sono cambiati: le letture in memoria vanno rifatte
@@ -301,6 +382,10 @@ def salva_impostazioni(w_conn, valori):
         w_conn.execute("INSERT INTO impostazioni (chiave, valore) VALUES (?, ?) ON CONFLICT(chiave) DO UPDATE SET valore = excluded.valore",
                        [chiave, str(valore)])
 
+# Ricevute per donazioni: vanno sul conto Erogazioni liberali e non contano come quote versate
+CAUSALE_EROGAZIONE = "Erogazione Liberale"
+SQL_NON_EROGAZIONE = "causale NOT LIKE 'Erogazione Liberale%'"
+
 CAMPI_SOCIETA = {
     "societa_denominazione": "Denominazione",
     "societa_sede": "Sede legale (indirizzo, CAP, comune)",
@@ -384,7 +469,8 @@ def dati_quote(inizio, fine):
         """)
     df_vers = leggi_df(
         "SELECT anagrafica_id, SUM(importo) AS versato FROM ricevute_istituzionali "
-        "WHERE credito_pregresso = 0 AND data_emissione BETWEEN ? AND ? GROUP BY anagrafica_id", [str(inizio), str(fine)])
+        "WHERE credito_pregresso = 0 AND data_emissione BETWEEN ? AND ? AND " + SQL_NON_EROGAZIONE + " GROUP BY anagrafica_id",
+        [str(inizio), str(fine)])
     return df_tess, df_vers
 
 def crediti_residui(etichetta, inizio, fine, tipo):
@@ -622,7 +708,8 @@ def pagina_dashboard():
     )["tot"].iloc[0]
 
     tot_quote = leggi_df(
-        "SELECT COALESCE(SUM(importo), 0.0) as tot FROM ricevute_istituzionali WHERE strftime('%Y', data_emissione) = ?", [current_year]
+        "SELECT COALESCE(SUM(importo), 0.0) as tot FROM ricevute_istituzionali WHERE strftime('%Y', data_emissione) = ? AND " + SQL_NON_EROGAZIONE,
+        [current_year]
     )["tot"].iloc[0]
 
     k1, k2, k3, k4 = st.columns(4)
@@ -1211,7 +1298,8 @@ def pagina_soci():
         es_ls = st.selectbox("Esercizio", list(periodi_ls), key="libro_esercizio")
         ini_ls, fin_ls = periodi_ls[es_ls]
         df_versato_ls = leggi_df(
-            "SELECT anagrafica_id, SUM(importo) AS versato FROM ricevute_istituzionali WHERE data_emissione BETWEEN ? AND ? GROUP BY anagrafica_id",
+            "SELECT anagrafica_id, SUM(importo) AS versato FROM ricevute_istituzionali WHERE data_emissione BETWEEN ? AND ? "
+            "AND " + SQL_NON_EROGAZIONE + " GROUP BY anagrafica_id",
             [str(ini_ls), str(fin_ls)])
         df_libro = libro_soci.elenco(leggi_df(libro_soci.SQL_SOCI), df_versato_ls, ini_ls, fin_ls)
         l1, l2, l3 = st.columns(3)
@@ -1499,6 +1587,13 @@ def pagina_distinte():
         ORDER BY d.data_gara DESC, d.id DESC
         """,
     )
+    if utenti.limita_squadre(utente_corrente()["ruolo"]):
+        # L'allenatore vede le distinte con giocatori delle sue squadre (e quelle ancora senza giocatori)
+        df_cat_dist = leggi_df(
+            "SELECT DISTINCT r.distinta_id, t.categoria FROM distinte_gara_righe r JOIN tesserati_calcio t ON t.anagrafica_id = r.anagrafica_id "
+            "WHERE r.sezione = 'GIOCATORE'")
+        proprie = set(df_cat_dist.loc[df_cat_dist["categoria"].isin(utente_corrente()["squadre"]), "distinta_id"])
+        df_archivio = df_archivio[df_archivio["id"].isin(proprie) | (df_archivio["giocatori"] == 0)]
     df_modello = leggi_df("SELECT nome_file, caricato_il FROM modelli_documenti WHERE nome = 'distinta_gara'")
 
     tab_compila, tab_archivio, tab_modello = st.tabs(["📝 Compila distinta", "📚 Archivio", "⚙️ Modello Word"])
@@ -1521,7 +1616,7 @@ def pagina_distinte():
         df_r_sal = leggi_df("SELECT * FROM distinte_gara_righe WHERE distinta_id = ? ORDER BY ordine", [id_base])
         df_pers = leggi_df(
             """
-            SELECT a.id, a.denominazione, a.codice_fiscale, a.tipo_documento, a.numero_documento,
+            SELECT a.id, a.denominazione, a.codice_fiscale, a.tipo_documento, a.numero_documento, t.categoria,
                    t.numero_tessera, t.numero_scheda_attivita, t.tipo_tessera, t.numero_maglia, t.gioca, t.socio_altra_societa,
                    c.data_scadenza, c.stato_idoneita
             FROM tesserati_calcio t
@@ -1534,7 +1629,10 @@ def pagina_distinte():
             WHERE t.stato = 'ATTIVO'
             ORDER BY a.denominazione
             """,
-        ).drop_duplicates("id")
+        )
+        if utenti.limita_squadre(utente_corrente()["ruolo"]):  # l'allenatore vede i suoi giocatori e lo staff
+            df_pers = df_pers[df_pers["categoria"].isin(utente_corrente()["squadre"] + ["STAFF"])]
+        df_pers = df_pers.drop_duplicates("id")
 
         testata_sal = {c: valore_pulito(v) for c, v in df_t_sal.iloc[0].items()} if not df_t_sal.empty else {}
         righe_sal = [{c: valore_pulito(v) for c, v in r.items()} for r in df_r_sal.to_dict("records")]
@@ -1834,7 +1932,9 @@ def pagina_ricevute():
             socio_sel = col3.selectbox("Socio / Tesserato / Versante", list(soci_dict.keys()))
 
             c4, c5, c6 = st.columns(3)
-            tipo_causale = c4.selectbox("Tipologia Quota", ["Quota Associativa Annua", "Quota Iscrizione e Frequenza Campionato", "Contributo Istituzionale Straordinario"])
+            tipo_causale = c4.selectbox("Tipologia", ["Quota Associativa Annua", "Quota Iscrizione e Frequenza Campionato", "Contributo Istituzionale Straordinario",
+                                                      CAUSALE_EROGAZIONE],
+                                        help="Erogazione liberale: donazione senza nulla in cambio; non conta come quota versata.")
             causale_custom = c5.text_input("Dettaglio / Anno Sociale", value=f"Anno {anno_ric}")
             importo = c6.number_input("Importo Incassato (€)", min_value=0.01, step=10.0)
 
@@ -1851,7 +1951,9 @@ def pagina_ricevute():
             if st.form_submit_button("Emetti Ricevuta e Registra in Prima Nota"):
                 socio_altrove_ric = leggi_df("SELECT COALESCE(MAX(socio_altra_societa), 0) AS s FROM tesserati_calcio WHERE anagrafica_id = ?",
                                              [int(soci_dict[socio_sel])])["s"].iloc[0]
-                if socio_altrove_ric and "Associativa" in tipo_causale:
+                if pregresso and tipo_causale == CAUSALE_EROGAZIONE:
+                    st.error("Un'erogazione liberale non incassa quote degli esercizi precedenti: togli la spunta sulla quota pregressa.")
+                elif socio_altrove_ric and "Associativa" in tipo_causale:
                     st.error("Questa persona è socia di un'altra società e qui ha solo la scheda attività: non può versare la quota associativa. "
                              "Scegli «Quota Iscrizione e Frequenza Campionato».")
                 elif importo > 0:
@@ -1859,7 +1961,7 @@ def pagina_ricevute():
                     bollo = 0.00  # ASD esenti dall'imposta di bollo: art. 27-bis Tabella B DPR 642/1972 (art. 90 c. 6 L. 289/2002)
                     # BONIFICO e POS vanno in banca, PAYPAL sul conto PayPal, CONTANTI in cassa
                     cod_cassa_banca = {"BONIFICO": "10.01.001", "POS": "10.01.001", "PAYPAL": "10.01.003"}.get(pagamento, "10.01.002")
-                    cod_ricavo = "50.01.001" if "Annua" in tipo_causale else "50.01.002"
+                    cod_ricavo = "50.01.003" if tipo_causale == CAUSALE_EROGAZIONE else ("50.01.001" if "Annua" in tipo_causale else "50.01.002")
                     if pregresso:
                         cod_ricavo = esercizio.CONTO_CREDITI_SOCI  # si incassa un credito, non un nuovo ricavo
 
@@ -2783,6 +2885,16 @@ def pagina_prima_nota():
         apertura_es = df_aperture[df_aperture["esercizio"] == es_sel]
         if not apertura_es.empty:
             st.success(f"L'esercizio {es_sel} è già stato aperto ({apertura_es['creata_il'].iloc[0]}). Puoi correggere i valori e salvare di nuovo.")
+        # I saldi si sommano su tutta la prima nota: se ci sono già registrazioni precedenti, i saldi di partenza
+        # esistono già e un'apertura li conterebbe due volte (l'apertura serve solo per il primo esercizio gestito nell'app)
+        n_prec_ap = leggi_df("SELECT COUNT(*) AS n FROM movimenti_prima_nota WHERE data_registrazione < ? AND id NOT IN "
+                             "(SELECT movimento_id FROM aperture_esercizio WHERE movimento_id IS NOT NULL AND esercizio = ?)",
+                             [str(ini_es), es_sel])["n"].iloc[0]
+        apertura_bloccata = bool(n_prec_ap) and apertura_es.empty
+        if apertura_bloccata:
+            st.warning(f"In prima nota ci sono già {int(n_prec_ap)} registrazioni prima del {ini_es.strftime('%d/%m/%Y')}: "
+                       "i saldi di partenza di banca, PayPal, cassa e debiti risultano già da quelle. "
+                       "Un'apertura li conterebbe due volte, quindi qui non si può salvare.")
 
         persone = leggi_df("SELECT id, denominazione FROM anagrafiche WHERE tipo IN ('SOCIO_CALCIATORE', 'ALTRO') ORDER BY denominazione")
         sponsor = leggi_df("SELECT id, denominazione FROM anagrafiche WHERE tipo = 'SPONSOR' ORDER BY denominazione")
@@ -2863,7 +2975,7 @@ def pagina_prima_nota():
         if righe_ap:
             st.dataframe(pd.DataFrame(righe_ap, columns=["Conto", "Descrizione", "Dare (€)", "Avere (€)"]), width="stretch", hide_index=True)
 
-        if st.button(f"💾 Salva apertura esercizio {es_sel}", type="primary", disabled=not righe_ap, key=ka + "salva"):
+        if st.button(f"💾 Salva apertura esercizio {es_sel}", type="primary", disabled=not righe_ap or apertura_bloccata, key=ka + "salva"):
             try:
                 with db_write() as w_conn:
                     if not apertura_es.empty:
@@ -3028,6 +3140,8 @@ def pagina_backup():
                            file_name=f"esercizio_{es_bk.replace('/', '-')}_{oggi_txt}.xlsx", mime=MIME_XLSX)
         st.dataframe(pd.DataFrame(conteggi_es), hide_index=True)
 
+    if utente_corrente()["ruolo"] != "ADMIN":
+        return
     st.markdown("---")
     st.markdown("#### ♻️ Ripristino da una copia completa")
     st.warning("Il ripristino **sostituisce tutti i dati** dell'app con quelli della copia (il modello Word delle distinte resta com'è). "
@@ -3070,16 +3184,20 @@ def pagina_backup():
                         # Turso non sempre segnala l'errore di uno script: si controlla che ogni tabella abbia le righe attese
                         diverse = [t for t, n in attese_rip.items() if conn_rip.execute(f'SELECT COUNT(*) FROM "{t}"').fetchone()[0] != n]
                     if diverse:
+                        esito_rip = "ripristino da copia NON riuscito (tabelle non coerenti: " + ", ".join(diverse) + ")"
                         st.error("Il ripristino non è andato a buon fine (tabelle non coerenti: " + ", ".join(diverse) + "). "
                                  "Se i dati risultano cambiati, ripristina la copia dei dati di prima qui sotto.")
                     else:
+                        esito_rip = f"ripristino da copia «{file_rip.name}»: {sum(attese_rip.values())} righe"
                         st.success(f"Ripristino completato: {sum(attese_rip.values())} righe in {len(attese_rip)} tabelle.")
                 except Exception as ex_rip:
+                    esito_rip = f"ripristino da copia non eseguito ({ex_rip})"
                     st.error(f"Ripristino non eseguito, i dati non sono stati modificati. Dettaglio: {ex_rip}")
                 finally:
                     conn_rip.close()
                     sincronizza_letture()
                     st.cache_data.clear()
+                scrivi_accesso(lambda c: utenti.annota(c, etichetta_utente(utente_corrente()), pagina_corrente(), esito_rip))
     if st.session_state.get("rip_copia_prima"):
         st.download_button("📥 Scarica la copia dei dati com'erano prima del ripristino", st.session_state["rip_copia_prima"],
                            file_name=f"backup_prima_del_ripristino_{oggi_txt}.xlsx", mime=MIME_XLSX, key="rip_copia_btn")
@@ -3297,17 +3415,31 @@ def pagina_squadra():
     categorie_sq = [c for c in CATEGORIE_LISTA if c != "STAFF"]
     df_gioc = leggi_df(
         """
-        SELECT a.id, a.denominazione, t.categoria, c.scad
+        SELECT a.id, a.denominazione, a.telefono, a.email, t.categoria, c.scad
         FROM tesserati_calcio t JOIN anagrafiche a ON a.id = t.anagrafica_id
         LEFT JOIN (SELECT anagrafica_id, MAX(data_scadenza) AS scad FROM certificati_medici GROUP BY anagrafica_id) c ON c.anagrafica_id = a.id
         WHERE t.stato = 'ATTIVO' AND t.gioca = 1
         ORDER BY a.denominazione
         """)
     usate = [c for c in categorie_sq if c in set(df_gioc["categoria"])] or categorie_sq
+    if utenti.limita_squadre(utente_corrente()["ruolo"]):
+        usate = [c for c in categorie_sq if c in utente_corrente()["squadre"]]
+        if not usate:
+            st.info("Non hai ancora squadre assegnate: chiedi all'amministratore di indicarle nella pagina «Utenti e registro».")
+            return
     cat_sq = st.selectbox("Squadra", usate, key="sq_categoria")
     gioc_cat = df_gioc[df_gioc["categoria"] == cat_sq]
     nomi_sq = {int(r.id): r.denominazione for r in gioc_cat.itertuples()}
-    tab_conv, tab_pres, tab_stat = st.tabs(["⚽ Convocazioni", "✅ Presenze allenamenti", "📊 Statistiche"])
+    tab_conv, tab_pres, tab_stat, tab_rosa = st.tabs(["⚽ Convocazioni", "✅ Presenze allenamenti", "📊 Statistiche", "👥 Rosa"])
+
+    with tab_rosa:
+        oggi_rosa = datetime.date.today().isoformat()
+        st.dataframe(pd.DataFrame({
+            "Giocatore": gioc_cat["denominazione"], "Telefono": gioc_cat["telefono"].fillna(""), "Email": gioc_cat["email"].fillna(""),
+            "Certificato medico": [f"✅ valido fino al {pd.Timestamp(s).strftime('%d/%m/%Y')}" if pd.notna(s) and str(s) >= oggi_rosa
+                                   else "⛔ scaduto o mancante" for s in gioc_cat["scad"]],
+        }), width="stretch", hide_index=True)
+        st.caption(f"{len(gioc_cat)} giocatori attivi.")
 
     with tab_conv:
         with st.form("nuova_convocazione", clear_on_submit=True):
@@ -3423,43 +3555,234 @@ def pagina_squadra():
         st.dataframe(squadra.statistiche(df_pr), width="stretch", hide_index=True)
 
 
+def pagina_account():
+    st.subheader("👤 Il mio account")
+    utente = utente_corrente()
+    if not utente.get("id"):
+        st.info("Sei entrato con la **password generale** (accesso d'emergenza dell'amministratore). "
+                "Si cambia dai Secrets dell'app su Streamlit; gli accessi personali si creano dalla pagina «Utenti e registro».")
+        return
+    st.write(f"**{utente['nome']}** — nome utente `{utente['nome_utente']}` — ruolo: {utenti.RUOLI.get(utente['ruolo'], utente['ruolo'])}")
+    if utenti.limita_squadre(utente["ruolo"]):
+        st.write("Squadre: " + (", ".join(utente["squadre"]) or "nessuna (chiedi all'amministratore di assegnartele)"))
+    with st.form("cambio_password", clear_on_submit=True):
+        st.markdown("**🔑 Cambia la password**")
+        attuale = st.text_input("Password attuale", type="password")
+        nuova = st.text_input("Nuova password", type="password", help=f"Almeno {utenti.LUNGHEZZA_MINIMA} caratteri.")
+        ripeti = st.text_input("Ripeti la nuova password", type="password")
+        if st.form_submit_button("Salva la nuova password"):
+            conn_pw = get_ro_conn()
+            try:
+                hash_attuale = conn_pw.execute("SELECT password_hash FROM utenti WHERE id = ?", [utente["id"]]).fetchone()[0]
+            finally:
+                conn_pw.close()
+            problema = (None if utenti.password_corretta(attuale, hash_attuale) else "La password attuale non è corretta.") \
+                or utenti.problema_password(nuova) or (None if nuova == ripeti else "Le due password non coincidono.")
+            if problema:
+                st.error(problema)
+            else:
+                _cambia_password(utente, nuova)
+                st.success("Password cambiata.")
+
+
+def registro_attivita():
+    st.caption("Chi ha salvato, modificato o eliminato cosa, e gli accessi. Le righe non si possono modificare dall'app.")
+    r1, r2, r3 = st.columns(3)
+    dal = r1.date_input("Dal", value=datetime.date.today() - datetime.timedelta(days=30), format="DD/MM/YYYY", key="reg_dal")
+    al = r2.date_input("Al", value=datetime.date.today(), format="DD/MM/YYYY", key="reg_al")
+    conn_reg = get_ro_conn()
+    try:
+        df_reg = pd.read_sql_query("SELECT quando, utente, pagina, azione FROM registro_attivita WHERE quando >= ? AND quando < ? ORDER BY id DESC LIMIT 2000",
+                                   conn_reg, params=[str(dal), str(al + datetime.timedelta(days=1))])
+    finally:
+        conn_reg.close()
+    chi = r3.selectbox("Utente", ["Tutti"] + sorted(df_reg["utente"].unique()), key="reg_chi")
+    if chi != "Tutti":
+        df_reg = df_reg[df_reg["utente"] == chi]
+    df_reg["quando"] = pd.to_datetime(df_reg["quando"], errors="coerce").dt.strftime("%d/%m/%Y %H:%M")
+    st.dataframe(df_reg.rename(columns={"quando": "Quando", "utente": "Utente", "pagina": "Pagina", "azione": "Cosa"}),
+                 width="stretch", hide_index=True)
+    st.caption(f"{len(df_reg)} righe (al massimo le ultime 2000 del periodo).")
+
+
+def pagina_utenti():
+    if not ACCESSI_PERSONALI:
+        st.subheader("📜 Registro attività")
+        st.info("Con la password unica il registro annota cosa è stato fatto e quando, ma non da chi: "
+                "il nome compare quando si attivano gli accessi personali.")
+        registro_attivita()
+        return
+    st.subheader("🔐 Utenti e registro attività")
+    tab_ut, tab_reg = st.tabs(["👥 Utenti", "📜 Registro attività"])
+    io_stesso = utente_corrente().get("id")
+    squadre_possibili = [c for c in CATEGORIE_LISTA if c != "STAFF"]
+
+    with tab_ut:
+        if "ut_password_nuova" in st.session_state:
+            nome_pw, pw = st.session_state.pop("ut_password_nuova")
+            st.success(f"Password provvisoria di **{nome_pw}** (si vede solo adesso: comunicala a voce o in un messaggio privato). "
+                       "Al primo accesso l'app chiederà di sceglierne una personale.")
+            st.code(pw, language=None)
+        conn_ut = get_ro_conn()  # sempre aggiornata: ultimo accesso e blocchi cambiano a ogni tentativo di accesso
+        try:
+            df_ut = pd.read_sql_query("SELECT id, nome_utente, nome, ruolo, squadre, attivo, ultimo_accesso, bloccato_fino FROM utenti ORDER BY attivo DESC, nome", conn_ut)
+        finally:
+            conn_ut.close()
+        if df_ut.empty:
+            st.info("Nessun utente ancora: crea il primo qui sotto (per te stesso, come amministratore).")
+        else:
+            vista_ut = pd.DataFrame({
+                "Nome": df_ut["nome"], "Nome utente": df_ut["nome_utente"],
+                "Ruolo": df_ut["ruolo"].map(utenti.RUOLI), "Squadre": df_ut["squadre"].fillna("").str.replace(",", ", "),
+                "Attivo": df_ut["attivo"].map({1: "Sì", 0: "No"}),
+                "Ultimo accesso": pd.to_datetime(df_ut["ultimo_accesso"], errors="coerce").dt.strftime("%d/%m/%Y %H:%M").fillna("mai"),
+            })
+            st.dataframe(vista_ut, width="stretch", hide_index=True)
+
+        with st.form("nuovo_utente", clear_on_submit=True):
+            st.markdown("**➕ Nuovo utente**")
+            n1, n2 = st.columns(2)
+            nome_nu = n1.text_input("Nome e cognome")
+            utente_nu = n2.text_input("Nome utente per entrare", placeholder="es. mario.rossi",
+                                      help="Solo lettere minuscole, numeri, punto, trattino; da 3 a 30 caratteri.")
+            n3, n4 = st.columns(2)
+            ruolo_nu = n3.selectbox("Ruolo", list(utenti.RUOLI), format_func=utenti.RUOLI.get)
+            squadre_nu = n4.multiselect("Squadre (solo per allenatori e dirigenti di squadra)", squadre_possibili)
+            if st.form_submit_button("Crea l'utente", type="primary"):
+                utente_nu = utente_nu.strip().lower()
+                if not nome_nu.strip():
+                    st.error("Scrivi nome e cognome.")
+                elif not utenti.nome_utente_valido(utente_nu):
+                    st.error("Nome utente non valido: solo lettere minuscole, numeri, punto, trattino (da 3 a 30 caratteri).")
+                elif utente_nu in set(df_ut["nome_utente"]):
+                    st.error("Questo nome utente esiste già.")
+                elif ruolo_nu == "ALLENATORE" and not squadre_nu:
+                    st.error("Scegli almeno una squadra per l'allenatore.")
+                else:
+                    pw_nu = utenti.password_provvisoria()
+                    try:
+                        with db_write() as w_conn:
+                            w_conn.execute("INSERT INTO utenti (nome_utente, nome, ruolo, squadre, password_hash) VALUES (?, ?, ?, ?, ?)",
+                                           [utente_nu, nome_nu.strip(), ruolo_nu, ",".join(squadre_nu) if ruolo_nu == "ALLENATORE" else None,
+                                            utenti.cifra_password(pw_nu)])
+                        st.session_state["ut_password_nuova"] = (nome_nu.strip(), pw_nu)
+                        st.rerun()
+                    except Exception as ex_nu:
+                        st.error(f"Utente non creato: {ex_nu}")
+
+        if not df_ut.empty:
+            st.markdown("**✏️ Modifica un utente**")
+            elenco_ut = {int(r.id): f"{r.nome} ({r.nome_utente})" + ("" if r.attivo else " — disattivato") for r in df_ut.itertuples()}
+            uid = st.selectbox("Utente", list(elenco_ut), format_func=elenco_ut.get, key="ut_sel")
+            riga = df_ut[df_ut["id"] == uid].iloc[0]
+            with st.form(f"modifica_utente_{uid}"):
+                m1, m2 = st.columns(2)
+                ruolo_mod = m1.selectbox("Ruolo", list(utenti.RUOLI), index=list(utenti.RUOLI).index(riga["ruolo"]), format_func=utenti.RUOLI.get)
+                squadre_mod = m2.multiselect("Squadre (solo per allenatori e dirigenti di squadra)", squadre_possibili,
+                                             default=[s for s in utenti.squadre_da_testo(riga["squadre"]) if s in squadre_possibili])
+                attivo_mod = st.checkbox("Attivo (può entrare)", value=bool(riga["attivo"]),
+                                         help="Chi lascia la società va disattivato, non cancellato: il registro attività resta leggibile.")
+                if pd.notna(riga["bloccato_fino"]):
+                    st.caption(f"Accesso bloccato per troppi tentativi fino a {str(riga['bloccato_fino'])[11:16]}: salvando si sblocca.")
+                if st.form_submit_button("💾 Salva le modifiche"):
+                    if uid == io_stesso and (ruolo_mod != "ADMIN" or not attivo_mod):
+                        st.error("Non puoi togliere a te stesso il ruolo di amministratore o disattivarti.")
+                    elif ruolo_mod == "ALLENATORE" and not squadre_mod:
+                        st.error("Scegli almeno una squadra per l'allenatore.")
+                    else:
+                        with db_write() as w_conn:
+                            w_conn.execute("UPDATE utenti SET ruolo = ?, squadre = ?, attivo = ?, tentativi_falliti = 0, bloccato_fino = NULL WHERE id = ?",
+                                           [ruolo_mod, ",".join(squadre_mod) if ruolo_mod == "ALLENATORE" else None, int(attivo_mod), uid])
+                        st.session_state["flash"] = f"Utente {riga['nome']} aggiornato."
+                        st.rerun()
+            if st.button("🔑 Genera una nuova password provvisoria", key="ut_reset",
+                         help="Per chi ha dimenticato la password: al prossimo accesso dovrà sceglierne una nuova."):
+                pw_reset = utenti.password_provvisoria()
+                with db_write() as w_conn:
+                    w_conn.execute("UPDATE utenti SET password_hash = ?, cambio_password = 1, tentativi_falliti = 0, bloccato_fino = NULL WHERE id = ?",
+                                   [utenti.cifra_password(pw_reset), uid])
+                st.session_state["ut_password_nuova"] = (riga["nome"], pw_reset)
+                st.rerun()
+
+    with tab_reg:
+        registro_attivita()
+
+
 # ---------------------------------------------------------
-# MENU LATERALE A SEZIONI
+# ACCESSO, BARRA LATERALE E MENU A SEZIONI (le voci dipendono dal ruolo)
 # ---------------------------------------------------------
-pagina = st.navigation({
+_verifica_accesso()
+UTENTE = utente_corrente()
+
+if ACCESSI_PERSONALI:
+    st.sidebar.markdown(f"👤 **{UTENTE['nome']}**  \n{utenti.RUOLI.get(UTENTE['ruolo'], UTENTE['ruolo'])}")
+if st.sidebar.button("🚪 Esci"):
+    for chiave in ("autenticato", "utente"):
+        st.session_state.pop(chiave, None)
+    st.rerun()
+
+if st.sidebar.button("🔄 Ricarica dati", help="Rilegge i dati dal database (utile se sono stati modificati da un altro dispositivo)."):
+    sincronizza_letture()
+    st.cache_data.clear()
+    st.rerun()
+
+if not usa_turso():
+    st.sidebar.warning("⚠️ Turso non configurato: stai usando un database LOCALE di prova.")
+
+# Gestione Notifiche Flash
+if "flash" in st.session_state:
+    st.success(st.session_state.pop("flash"))
+if "flash_error" in st.session_state:
+    st.error(st.session_state.pop("flash_error"))
+
+st.title(f"⚽ {APP_TITLE}")
+if not utenti.puo_scrivere(UTENTE["ruolo"]):
+    st.info("👁️ Profilo di sola consultazione: puoi vedere i dati ma non salvare modifiche.")
+
+MENU = {
     "Generale": [
-        st.Page(pagina_dashboard, title="Dashboard e scadenze", icon="📊", url_path="dashboard", default=True),
-    ],
+        (pagina_dashboard, "Dashboard e scadenze", "📊", "dashboard"),
+    ] + ([(pagina_account, "Il mio account", "👤", "account")] if ACCESSI_PERSONALI else []),
     "Tesserati e squadra": [
-        st.Page(pagina_soci, title="Soci, atleti e dirigenti", icon="🏃", url_path="soci"),
-        st.Page(pagina_distinte, title="Distinte di gara", icon="📋", url_path="distinte"),
-        st.Page(pagina_squadra, title="Convocazioni e presenze", icon="📣", url_path="convocazioni"),
+        (pagina_soci, "Soci, atleti e dirigenti", "🏃", "soci"),
+        (pagina_distinte, "Distinte di gara", "📋", "distinte"),
+        (pagina_squadra, "Convocazioni e presenze", "📣", "convocazioni"),
     ],
     "Incassi e pagamenti": [
-        st.Page(pagina_ricevute, title="Ricevute e quote", icon="📜", url_path="ricevute"),
-        st.Page(pagina_sponsor, title="Sponsor e pubblicità", icon="🏢", url_path="sponsor"),
-        st.Page(pagina_spese, title="Spese e fornitori", icon="🧾", url_path="spese"),
-        st.Page(pagina_lavoro_sportivo, title="Collaboratori e rimborsi", icon="⚽", url_path="collaboratori"),
+        (pagina_ricevute, "Ricevute e quote", "📜", "ricevute"),
+        (pagina_sponsor, "Sponsor e pubblicità", "🏢", "sponsor"),
+        (pagina_spese, "Spese e fornitori", "🧾", "spese"),
+        (pagina_lavoro_sportivo, "Collaboratori e rimborsi", "⚽", "collaboratori"),
     ],
     "Contabilità": [
-        st.Page(pagina_prima_nota, title="Prima nota, rendiconto e apertura", icon="📖", url_path="prima-nota"),
-        st.Page(pagina_estratti_conto, title="Estratti conto", icon="🏦", url_path="estratti-conto"),
-        st.Page(pagina_preventivo, title="Preventivo e consuntivo", icon="🎯", url_path="preventivo"),
+        (pagina_prima_nota, "Prima nota, rendiconto e apertura", "📖", "prima-nota"),
+        (pagina_estratti_conto, "Estratti conto", "🏦", "estratti-conto"),
+        (pagina_preventivo, "Preventivo e consuntivo", "🎯", "preventivo"),
     ],
     "Impostazioni": [
-        st.Page(pagina_parametri, title="Parametri stagione", icon="⚙️", url_path="parametri"),
-        st.Page(pagina_piano_conti, title="Piano dei conti", icon="🌳", url_path="piano-dei-conti"),
-        pagina_backup_menu := st.Page(pagina_backup, title="Backup ed esportazioni", icon="💾", url_path="backup"),
+        (pagina_parametri, "Parametri stagione", "⚙️", "parametri"),
+        (pagina_piano_conti, "Piano dei conti", "🌳", "piano-dei-conti"),
+        (pagina_backup, "Backup ed esportazioni", "💾", "backup"),
+        (pagina_utenti, "Utenti e registro" if ACCESSI_PERSONALI else "Registro attività", "🔐" if ACCESSI_PERSONALI else "📜", "utenti"),
     ],
-})
+}
+pagina_iniziale = utenti.PAGINA_INIZIALE.get(UTENTE["ruolo"], "dashboard")
+pagine_menu, sezioni_menu = {}, {}
+for sezione, voci in MENU.items():
+    for funzione, titolo, icona, url in voci:
+        if utenti.pagina_permessa(UTENTE["ruolo"], url):
+            pagine_menu[url] = st.Page(funzione, title=titolo, icon=icona, url_path=url, default=url == pagina_iniziale)
+            sezioni_menu.setdefault(sezione, []).append(pagine_menu[url])
+pagina = st.navigation(sezioni_menu)
 
-giorni_bk = giorni_da_ultimo_backup()
-if giorni_bk is None or giorni_bk >= GIORNI_PROMEMORIA_BACKUP:
-    st.sidebar.warning("Nessuna copia di sicurezza scaricata finora." if giorni_bk is None
-                       else f"L'ultima copia di sicurezza è di {giorni_bk} giorni fa.", icon="💾")
-    st.sidebar.page_link(pagina_backup_menu, label="Fai il backup adesso", icon="📥")
-    if not st.session_state.get("avviso_backup_mostrato"):
-        st.session_state["avviso_backup_mostrato"] = True
-        st.toast("È ora di scaricare la copia di sicurezza dei dati (pagina Backup ed esportazioni).", icon="💾")
+if "backup" in pagine_menu:
+    giorni_bk = giorni_da_ultimo_backup()
+    if giorni_bk is None or giorni_bk >= GIORNI_PROMEMORIA_BACKUP:
+        st.sidebar.warning("Nessuna copia di sicurezza scaricata finora." if giorni_bk is None
+                           else f"L'ultima copia di sicurezza è di {giorni_bk} giorni fa.", icon="💾")
+        st.sidebar.page_link(pagine_menu["backup"], label="Fai il backup adesso", icon="📥")
+        if not st.session_state.get("avviso_backup_mostrato"):
+            st.session_state["avviso_backup_mostrato"] = True
+            st.toast("È ora di scaricare la copia di sicurezza dei dati (pagina Backup ed esportazioni).", icon="💾")
 
 pagina.run()

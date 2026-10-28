@@ -6,7 +6,8 @@ import pandas as pd
 
 # Il modello Word delle distinte è salvato come testo base64 di alcuni MB: non sta in una cella Excel
 # (massimo 32.767 caratteri) e si scarica a parte dalla pagina delle distinte.
-TABELLE_ESCLUSE = {"modelli_documenti"}
+TABELLE_ESCLUSE = {"modelli_documenti", "utenti"}  # gli utenti (password cifrate) non escono dall'app e il ripristino non li tocca
+TABELLE_NON_RIPRISTINATE = {"registro_attivita"}  # nella copia per consultazione, ma il ripristino non cancella la storia
 LIMITE_CELLA = 32767
 
 # Fogli leggibili: nome del foglio -> query con due parametri (inizio e fine dell'esercizio)
@@ -218,7 +219,7 @@ def script_ripristino(conn, tabelle):
     Si ripristinano solo le tabelle e le colonne presenti sia nella copia sia nel database; le tabelle escluse dalla copia
     (es. il modello Word delle distinte) restano come sono. Restituisce (script, {tabella: righe}).
     """
-    esistenti = set(elenco_tabelle(conn))
+    esistenti = set(elenco_tabelle(conn)) - TABELLE_NON_RIPRISTINATE
     istruzioni = ["PRAGMA foreign_keys = OFF;", "BEGIN;"]
     conteggi = {}
     for nome, (colonne, righe) in tabelle.items():
