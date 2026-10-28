@@ -21,7 +21,7 @@ from modules.db import ERRORE_ESERCIZIO_CHIUSO, PIANO_DEI_CONTI_ASD, _turso_cred
 # ---------------------------------------------------------
 # Incrementare a ogni modifica dello schema del DB: forza init_db() (e le migrazioni)
 # anche quando Streamlit Cloud aggiorna il codice senza riavviare il server.
-VERSIONE_SCHEMA_DB = 16
+VERSIONE_SCHEMA_DB = 17
 
 @st.cache_resource(show_spinner="Avvio dell'app…")
 def _setup_database(versione_schema):
@@ -99,9 +99,60 @@ def _cambia_password(utente, nuova):
         utenti.annota(conn, etichetta_utente(utente), "Accesso", "password cambiata")
     scrivi_accesso(scrivi)
 
+def _scrivi_cookie_ricordami(valore, giorni):
+    """Salva (o con giorni 0 cancella) la chiave «ricordami» nel browser; la legge st.context.cookies alla prossima apertura."""
+    st.html(f"""<script>document.cookie = "{utenti.COOKIE_RICORDAMI}={valore}; Max-Age={int(giorni * 86400)}; Path=/; SameSite=Lax"
+        + (location.protocol === "https:" ? "; Secure" : "");</script>""", unsafe_allow_javascript=True)
+
+def _ricorda_dispositivo(utente_id, segreto):
+    """Crea la chiave per questo dispositivo: il browser la riceve appena l'app si ricarica dopo l'accesso."""
+    st.session_state["_cookie_ricordami"] = scrivi_accesso(lambda c: utenti.crea_ricordo(c, utente_id, segreto))
+
+def _segreto_utente(conn, utente_id):
+    riga = conn.execute("SELECT password_hash FROM utenti WHERE id = ? AND attivo = 1", [int(utente_id)]).fetchone()
+    return riga[0] if riga else None
+
+def _rientro_ricordato():
+    """Accesso senza password da un dispositivo ricordato: la chiave deve esistere, non essere scaduta e la password
+    (dell'utente o generale) non deve essere cambiata da quando è stata data. Restituisce True se è entrato."""
+    chiave = st.context.cookies.get(utenti.COOKIE_RICORDAMI) if hasattr(st, "context") else None
+    if not chiave or st.session_state.get("_ricordo_rifiutato") == chiave:
+        return False
+    def controlla(conn):
+        trovata, uid, segreto_imp = utenti.leggi_ricordo(conn, chiave)
+        if not trovata:
+            return None
+        if uid is None:
+            valida = hmac.compare_digest(segreto_imp, utenti.impronta(_password_generale()))
+            utente = None
+        else:
+            valida = (segreto_imp == utenti.impronta(_segreto_utente(conn, uid))) and ACCESSI_PERSONALI
+            r = conn.execute("SELECT id, nome_utente, nome, ruolo, squadre, cambio_password FROM utenti WHERE id = ?", [int(uid)]).fetchone()
+            utente = {"id": r[0], "nome_utente": r[1], "nome": r[2], "ruolo": r[3], "squadre": utenti.squadre_da_testo(r[4]),
+                      "cambio_password": bool(r[5])} if r else None
+            valida = valida and utente is not None
+        if not valida:
+            utenti.cancella_ricordo(conn, chiave)
+            return None
+        utenti.annota(conn, utente["nome_utente"] if utente else ACCESSO_GENERALE["nome"], "Accesso", "accesso da dispositivo ricordato")
+        return {"utente": utente}
+    esito = scrivi_accesso(controlla)
+    if esito is None:
+        st.session_state["_ricordo_rifiutato"] = chiave
+        _scrivi_cookie_ricordami("", 0)
+        return False
+    st.session_state["autenticato"] = True
+    if esito["utente"]:
+        st.session_state["utente"] = esito["utente"]
+    else:
+        st.session_state.pop("utente", None)
+    return True
+
 def _accesso_generale(chiave):
     with st.form(chiave):
         pwd = st.text_input("Password generale" if ACCESSI_PERSONALI else "Password", type="password")
+        ricorda = st.checkbox(f"Ricordami su questo dispositivo ({utenti.GIORNI_RICORDAMI} giorni)", key=chiave + "_ricorda",
+                              help="Non serve rimettere la password finché non premi «Esci». Non usarlo su computer condivisi.")
         if st.form_submit_button("Entra"):
             corretta = hmac.compare_digest(pwd.encode("utf-8"), str(_password_generale()).encode("utf-8"))
             scrivi_accesso(lambda c: utenti.annota(c, ACCESSO_GENERALE["nome"], "Accesso",
@@ -109,6 +160,8 @@ def _accesso_generale(chiave):
             if corretta:
                 st.session_state["autenticato"] = True
                 st.session_state.pop("utente", None)
+                if ricorda:
+                    _ricorda_dispositivo(None, _password_generale())
                 st.rerun()
             time.sleep(1)  # rallenta i tentativi a caso
             st.error("Password errata.")
@@ -119,6 +172,10 @@ def _verifica_accesso():
         st.stop()
 
     if not st.session_state.get("autenticato"):
+        _rientro_ricordato()  # senza ricaricare: così si resta nella pagina dell'indirizzo aperto
+    if not st.session_state.get("autenticato"):
+        if st.session_state.pop("_cookie_cancella", False):
+            _scrivi_cookie_ricordami("", 0)
         st.title(f"⚽ {APP_TITLE}")
         if not ACCESSI_PERSONALI:
             _accesso_generale("login_generale")
@@ -129,6 +186,8 @@ def _verifica_accesso():
             with st.form("login"):
                 nome_ut = st.text_input("Nome utente")
                 pwd = st.text_input("Password", type="password")
+                ricorda = st.checkbox(f"Ricordami su questo dispositivo ({utenti.GIORNI_RICORDAMI} giorni)", key="login_ricorda",
+                                      help="Non serve rimettere la password finché non premi «Esci». Non usarlo su computer condivisi.")
                 if st.form_submit_button("Entra", type="primary"):
                     def prova(conn):
                         esito = utenti.verifica_accesso(conn, nome_ut, pwd)
@@ -138,6 +197,8 @@ def _verifica_accesso():
                     if utente:
                         st.session_state["autenticato"] = True
                         st.session_state["utente"] = utente
+                        if ricorda:
+                            _ricorda_dispositivo(utente["id"], scrivi_accesso(lambda c: _segreto_utente(c, utente["id"])))
                         st.rerun()
                     time.sleep(1)
                     st.error(errore)
@@ -4419,9 +4480,17 @@ UTENTE = utente_corrente()
 
 if ACCESSI_PERSONALI:
     st.sidebar.markdown(f"👤 **{UTENTE['nome']}**  \n{utenti.RUOLI.get(UTENTE['ruolo'], UTENTE['ruolo'])}")
+if "_cookie_ricordami" in st.session_state:
+    _scrivi_cookie_ricordami(st.session_state.pop("_cookie_ricordami"), utenti.GIORNI_RICORDAMI)
 if st.sidebar.button("🚪 Esci"):
+    # «Esci» dimentica anche questo dispositivo: la chiave non vale più e il browser la cancella
+    chiave_ric = st.context.cookies.get(utenti.COOKIE_RICORDAMI)
+    if chiave_ric:
+        scrivi_accesso(lambda c: utenti.cancella_ricordo(c, chiave_ric))
+        st.session_state["_ricordo_rifiutato"] = chiave_ric
     for chiave in ("autenticato", "utente"):
         st.session_state.pop(chiave, None)
+    st.session_state["_cookie_cancella"] = True
     st.rerun()
 
 if st.sidebar.button("🔄 Ricarica dati", help="Rilegge i dati dal database (utile se sono stati modificati da un altro dispositivo)."):

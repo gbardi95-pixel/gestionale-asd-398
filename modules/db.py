@@ -595,6 +595,17 @@ def init_db(versione_schema=None):
 
     # Esercizi chiusi dopo l'approvazione del rendiconto: restano consultabili, ma i trigger impediscono di registrare,
     # modificare o eliminare movimenti di prima nota con data nel periodo, da qualunque pagina
+    # Dispositivi «ricordati» al momento dell'accesso: solo l'impronta della chiave salvata nel browser, con la scadenza
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS accessi_ricordati (
+        chiave_impronta TEXT PRIMARY KEY,
+        utente_id INTEGER,
+        segreto_impronta TEXT NOT NULL,
+        creato_il TEXT NOT NULL,
+        scadenza TEXT NOT NULL
+    );
+    """)
+
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS esercizi_chiusi (
         esercizio TEXT PRIMARY KEY,

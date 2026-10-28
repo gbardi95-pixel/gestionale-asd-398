@@ -6,7 +6,7 @@ import pandas as pd
 
 # Il modello Word delle distinte è salvato come testo base64 di alcuni MB: non sta in una cella Excel
 # (massimo 32.767 caratteri) e si scarica a parte dalla pagina delle distinte.
-TABELLE_ESCLUSE = {"modelli_documenti", "utenti"}  # gli utenti (password cifrate) non escono dall'app e il ripristino non li tocca
+TABELLE_ESCLUSE = {"modelli_documenti", "utenti", "accessi_ricordati"}  # utenti (password cifrate) e dispositivi ricordati non escono dall'app e il ripristino non li tocca
 TABELLE_NON_RIPRISTINATE = {"registro_attivita"}  # nella copia per consultazione, ma il ripristino non cancella la storia
 LIMITE_CELLA = 32767
 

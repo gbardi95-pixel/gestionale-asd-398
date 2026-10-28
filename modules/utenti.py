@@ -135,11 +135,50 @@ def annota(conn, utente, pagina, azione, adesso=None):
 
 
 # ---------------------------------------------------------
+# «RICORDAMI SU QUESTO DISPOSITIVO»: chiave casuale nel browser, nel database solo la sua impronta
+# ---------------------------------------------------------
+GIORNI_RICORDAMI = 30
+COOKIE_RICORDAMI = "gestionale_ricordami"
+
+
+def impronta(testo):
+    return hashlib.sha256(str(testo or "").encode("utf-8")).hexdigest()
+
+
+def crea_ricordo(conn, utente_id, segreto, adesso=None):
+    """Nuova chiave per il dispositivo (il chiamante fa il commit). utente_id None = password generale.
+
+    segreto: password cifrata dell'utente (o password generale): se cambia, le chiavi già date smettono di valere.
+    """
+    adesso = adesso or _adesso()
+    conn.execute("DELETE FROM accessi_ricordati WHERE scadenza < ?", [adesso.isoformat(sep=" ")])
+    chiave = secrets.token_urlsafe(32)
+    conn.execute("INSERT INTO accessi_ricordati (chiave_impronta, utente_id, segreto_impronta, creato_il, scadenza) VALUES (?, ?, ?, ?, ?)",
+                 [impronta(chiave), utente_id, impronta(segreto), adesso.isoformat(sep=" "),
+                  (adesso + datetime.timedelta(days=GIORNI_RICORDAMI)).isoformat(sep=" ")])
+    return chiave
+
+
+def leggi_ricordo(conn, chiave, adesso=None):
+    """(trovata, utente_id, impronta del segreto) della chiave ancora valida; trovata False se non esiste o è scaduta."""
+    if not chiave:
+        return False, None, None
+    riga = conn.execute("SELECT utente_id, segreto_impronta FROM accessi_ricordati WHERE chiave_impronta = ? AND scadenza >= ?",
+                        [impronta(chiave), (adesso or _adesso()).isoformat(sep=" ")]).fetchone()
+    return (True, riga[0], riga[1]) if riga else (False, None, None)
+
+
+def cancella_ricordo(conn, chiave):
+    if chiave:
+        conn.execute("DELETE FROM accessi_ricordati WHERE chiave_impronta = ?", [impronta(chiave)])
+
+
+# ---------------------------------------------------------
 # REGISTRO ATTIVITÀ: riassunto delle scritture fatte in un salvataggio
 # ---------------------------------------------------------
 ETICHETTE_TABELLE = {
     "anagrafiche": "anagrafica", "tesserati_calcio": "tesseramento", "certificati_medici": "certificato medico",
-    "ricevute_istituzionali": "ricevuta", "movimenti_prima_nota": "prima nota", "righe_prima_nota": None,
+    "accessi_ricordati": None, "ricevute_istituzionali": "ricevuta", "movimenti_prima_nota": "prima nota", "righe_prima_nota": None,
     "fatture_passive": "spesa", "compensi_sportivi": "compenso", "collaboratori_sportivi": "collaboratore",
     "rimborsi_trasferta": "rimborso", "fatture_sponsor_398": "fattura sponsor", "incassi_sponsor": "incasso sponsor",
     "scadenzario": "scadenzario", "estratti_conto_importati": "estratto conto", "aperture_esercizio": "apertura esercizio",
