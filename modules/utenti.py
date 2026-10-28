@@ -16,7 +16,7 @@ RUOLI = {
 PAGINE_RUOLO = {
     "ADMIN": None,
     "SEGRETERIA": {"dashboard", "account", "soci", "distinte", "convocazioni", "ricevute", "sponsor", "spese", "collaboratori",
-                   "prima-nota", "estratti-conto", "preventivo", "parametri", "piano-dei-conti", "backup"},
+                   "prima-nota", "preventivo", "parametri", "piano-dei-conti", "backup"},
     "ALLENATORE": {"account", "convocazioni", "distinte"},
     "CONSULTAZIONE": {"dashboard", "account", "prima-nota", "preventivo"},
 }

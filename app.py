@@ -1977,28 +1977,31 @@ def pagina_distinte():
                 "- Tabella staff: come sopra con `{%tr for d in dirigenti|righe(5) %}` e i campi `{{ d.ruolo }}`, `{{ d.nome }}`, "
                 "`{{ d.tipo_tessera }}`, `{{ d.tessera }}`, `{{ d.tipo_doc }}`, `{{ d.num_doc }}`."
             )
-        file_modello = st.file_uploader("Carica modello Word (.docx)", type=["docx"], key="modello_distinta_upl")
-        if file_modello is not None and st.button("💾 Usa questo modello", key="modello_distinta_salva"):
-            contenuto = file_modello.getvalue()
-            try:
-                distinte.genera_docx(contenuto, distinte.contesto_distinta({}, [], NOME_SOCIETA))  # prova di compilazione
-            except Exception as ex_mod:
-                st.error(f"Il modello non è valido: {ex_mod}")
-            else:
+        if utenti.limita_squadre(utente_corrente()["ruolo"]):
+            st.caption("Il modello vale per tutta la società: lo cambiano la segreteria o l'amministratore.")
+        else:
+            file_modello = st.file_uploader("Carica modello Word (.docx)", type=["docx"], key="modello_distinta_upl")
+            if file_modello is not None and st.button("💾 Usa questo modello", key="modello_distinta_salva"):
+                contenuto = file_modello.getvalue()
+                try:
+                    distinte.genera_docx(contenuto, distinte.contesto_distinta({}, [], NOME_SOCIETA))  # prova di compilazione
+                except Exception as ex_mod:
+                    st.error(f"Il modello non è valido: {ex_mod}")
+                else:
+                    with db_write() as w_conn:
+                        w_conn.execute(
+                            "INSERT INTO modelli_documenti (nome, nome_file, contenuto_base64, caricato_il) VALUES ('distinta_gara', ?, ?, ?) "
+                            "ON CONFLICT(nome) DO UPDATE SET nome_file = excluded.nome_file, contenuto_base64 = excluded.contenuto_base64, "
+                            "caricato_il = excluded.caricato_il",
+                            [file_modello.name, base64.b64encode(contenuto).decode("ascii"), datetime.datetime.now().strftime("%d/%m/%Y %H:%M")],
+                        )
+                    st.session_state["flash"] = "Modello della distinta aggiornato."
+                    st.rerun()
+            if not df_modello.empty and st.button("↩️ Torna al modello generico", key="modello_distinta_reset"):
                 with db_write() as w_conn:
-                    w_conn.execute(
-                        "INSERT INTO modelli_documenti (nome, nome_file, contenuto_base64, caricato_il) VALUES ('distinta_gara', ?, ?, ?) "
-                        "ON CONFLICT(nome) DO UPDATE SET nome_file = excluded.nome_file, contenuto_base64 = excluded.contenuto_base64, "
-                        "caricato_il = excluded.caricato_il",
-                        [file_modello.name, base64.b64encode(contenuto).decode("ascii"), datetime.datetime.now().strftime("%d/%m/%Y %H:%M")],
-                    )
-                st.session_state["flash"] = "Modello della distinta aggiornato."
+                    w_conn.execute("DELETE FROM modelli_documenti WHERE nome = 'distinta_gara'")
+                st.session_state["flash"] = "Ripristinato il modello generico."
                 st.rerun()
-        if not df_modello.empty and st.button("↩️ Torna al modello generico", key="modello_distinta_reset"):
-            with db_write() as w_conn:
-                w_conn.execute("DELETE FROM modelli_documenti WHERE nome = 'distinta_gara'")
-            st.session_state["flash"] = "Ripristinato il modello generico."
-            st.rerun()
 
 def pagina_ricevute():
     st.subheader("📜 Emissione Ricevute Istituzionali / Quote Associative")
@@ -2573,163 +2576,6 @@ def pagina_lavoro_sportivo():
                             st.rerun()
                         except Exception as ex_r:
                             st.error(f"Errore durante il salvataggio del rimborso: {ex_r}")
-
-# ---------------------------------------------------------
-# 6. RICONCILIAZIONE ESTRATTI CONTO
-# ---------------------------------------------------------
-def pagina_estratti_conto():
-    st.subheader("🏦 Riconciliazione Movimenti Bancari e PayPal")
-
-    tab_upload, tab_saved, tab_manual = st.tabs([
-        "📥 Importa Estratto Conto (CSV / Excel)",
-        "📋 Movimenti Salvati & Riconciliazione DB",
-        "➕ Inserimento Manuale Movimento"
-    ])
-
-    with tab_upload:
-        c_f1, c_f2 = st.columns(2)
-        tipo_fonte = c_f1.selectbox("Seleziona Conto di Origine", ["Conto Corrente Bancario", "Conto PayPal"])
-        uploaded_file = c_f2.file_uploader("Carica File Estratto Conto (.csv / .xlsx / .xls)", type=["csv", "xlsx", "xls"])
-
-        if uploaded_file is not None:
-            file_bytes = uploaded_file.read()
-            df_parsed, err = parse_bank_statement(file_bytes, uploaded_file.name, tipo_fonte)
-
-            if err:
-                st.error(f"⚠️ {err}")
-            elif not df_parsed.empty:
-                st.success(f"✅ Rilevati **{len(df_parsed)}** movimenti dal file `{uploaded_file.name}`.")
-
-                edited_df = st.data_editor(
-                    df_parsed,
-                    num_rows="dynamic",
-                    width="stretch",
-                    column_config={
-                        "data_transazione": st.column_config.TextColumn("Data (YYYY-MM-DD)"),
-                        "descrizione": st.column_config.TextColumn("Descrizione / Causale"),
-                        "importo_lordo": st.column_config.NumberColumn("Importo Lordo (€)", format="%.2f €"),
-                        "commissione": st.column_config.NumberColumn("Commissione (€)", format="%.2f €"),
-                        "importo_netto": st.column_config.NumberColumn("Importo Netto (€)", format="%.2f €"),
-                        "stato_riconciliazione": st.column_config.SelectboxColumn("Stato", options=["DA_RICONCILIARE", "RICONCILIATO"])
-                    }
-                )
-
-                if st.button("💾 Salva e Importa Movimenti nel Database"):
-                    clean_df = edited_df.dropna(subset=["data_transazione", "importo_lordo"])
-                    saved_count = 0
-                    doppi = 0
-                    fonte_str = "PAYPAL" if "PayPal" in tipo_fonte else "BANCA"
-                    numero = lambda v: 0.0 if v is None or pd.isna(v) else float(v)  # celle vuote dell'editor = 0
-
-                    try:
-                        with db_write() as w_conn:
-                            for _, row in clean_df.iterrows():
-                                d_trans = str(row["data_transazione"]).strip()
-                                desc_t = str(row["descrizione"]).strip()
-                                imp_l = numero(row["importo_lordo"])
-                                comm_t = numero(row.get("commissione"))
-                                imp_n = imp_l - comm_t if pd.isna(row.get("importo_netto")) else float(row["importo_netto"])
-                                st_ric = str(row.get("stato_riconciliazione") or "DA_RICONCILIARE")
-
-                                # Lo stesso estratto conto caricato due volte non deve duplicare i movimenti
-                                gia_presente = w_conn.execute(
-                                    "SELECT COUNT(*) FROM estratti_conto_importati WHERE fonte = ? AND data_transazione = ? AND descrizione = ? AND ROUND(importo_lordo, 2) = ROUND(?, 2)",
-                                    [fonte_str, d_trans, desc_t, imp_l]
-                                ).fetchone()[0]
-                                if gia_presente:
-                                    doppi += 1
-                                    continue
-
-                                w_conn.execute(
-                                    "INSERT INTO estratti_conto_importati (fonte, data_transazione, descrizione, importo_lordo, commissione, importo_netto, stato_riconciliazione) "
-                                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                                    [fonte_str, d_trans, desc_t, imp_l, comm_t, imp_n, st_ric]
-                                )
-                                saved_count += 1
-
-                        st.session_state["flash"] = f"🎉 Salvati **{saved_count}** movimenti nel database." + (
-                            f" {doppi} erano già presenti e non sono stati duplicati." if doppi else "")
-                        st.rerun()
-                    except Exception as ex_imp:
-                        st.error(f"Errore durante l'importazione dell'estratto conto: {ex_imp}")
-
-    with tab_saved:
-        st.markdown("### 📖 Movimenti Salvati in Archivio")
-        filtro_stato = st.selectbox("Filtra per Stato Riconciliazione", ["TUTTI", "DA_RICONCILIARE", "RICONCILIATO"])
-
-        query_str = "SELECT id, fonte as Fonte, data_transazione as Data, descrizione as Descrizione, importo_lordo as 'Lordo (€)', commissione as 'Commissione (€)', importo_netto as 'Netto (€)', stato_riconciliazione as Stato FROM estratti_conto_importati"
-        params = []
-        if filtro_stato != "TUTTI":
-            query_str += " WHERE stato_riconciliazione = ?"
-            params.append(filtro_stato)
-        query_str += " ORDER BY id DESC LIMIT 500"
-
-        df_db_saved = leggi_df(query_str, params)
-
-        if not df_db_saved.empty:
-            st.dataframe(df_db_saved, width="stretch")
-
-            st.divider()
-            st.markdown("### ⚡ Operazioni di Riconciliazione o Elimina")
-
-            c_m1, c_m2, c_m3 = st.columns([2, 2, 1])
-            mov_dict = {f"ID {row['id']} | {row['Data']} | {row['Descrizione']} (€ {row['Netto (€)']:.2f})": int(row["id"]) for _, row in df_db_saved.iterrows()}
-            mov_sel = c_m1.selectbox("Seleziona Movimento", list(mov_dict.keys()))
-
-            nuovo_stato = c_m2.selectbox("Imposta Stato", ["RICONCILIATO", "DA_RICONCILIARE"])
-
-            if c_m3.button("Aggiorna Stato"):
-                mov_id_sel = int(mov_dict[mov_sel])
-                try:
-                    with db_write() as w_conn:
-                        w_conn.execute(
-                            "UPDATE estratti_conto_importati SET stato_riconciliazione = ? WHERE id = ?",
-                            [str(nuovo_stato), mov_id_sel]
-                        )
-                    st.session_state["flash"] = f"Movimento ID {mov_id_sel} aggiornato a '{nuovo_stato}'!"
-                    st.rerun()
-                except Exception as ex_st:
-                    st.error(f"Errore durante l'aggiornamento dello stato: {ex_st}")
-
-            with st.expander("🗑️ Elimina Movimento Selezionato"):
-                if st.button("Conferma Eliminazione Record"):
-                    mov_id_sel = int(mov_dict[mov_sel])
-                    try:
-                        with db_write() as w_conn:
-                            w_conn.execute("DELETE FROM estratti_conto_importati WHERE id = ?", [mov_id_sel])
-                        st.session_state["flash"] = "Movimento eliminato dal database!"
-                        st.rerun()
-                    except Exception as ex_dm:
-                        st.error(f"Errore durante l'eliminazione del movimento: {ex_dm}")
-        else:
-            st.info("Nessun movimento bancario salvato nel database.")
-
-    with tab_manual:
-        st.markdown("### ➕ Inserimento Manuale Singolo Movimento Bancario")
-        with st.form("form_manual_bank_entry", clear_on_submit=True):
-            m_col1, m_col2, m_col3 = st.columns(3)
-            m_fonte = m_col1.selectbox("Conto Fonte", ["BANCA", "PAYPAL"])
-            m_data = m_col2.date_input("Data Transazione")
-            m_desc = m_col3.text_input("Descrizione / Causale Movimento", value="Bonifico incasso quota")
-
-            m_col4, m_col5 = st.columns(2)
-            m_lordo = m_col4.number_input("Importo Lordo (€) (valori negativi per uscite)", value=0.0, step=10.0)
-            m_comm = m_col5.number_input("Commissione (€)", min_value=0.0, value=0.0, step=1.0)
-
-            if st.form_submit_button("Salva Movimento nel Database"):
-                if m_desc and m_lordo != 0.0:
-                    m_netto = float(m_lordo) - float(m_comm)
-                    try:
-                        with db_write() as w_conn:
-                            w_conn.execute(
-                                "INSERT INTO estratti_conto_importati (fonte, data_transazione, descrizione, importo_lordo, commissione, importo_netto, stato_riconciliazione) "
-                                "VALUES (?, ?, ?, ?, ?, ?, 'DA_RICONCILIARE')",
-                                [str(m_fonte), str(m_data), str(m_desc).strip(), float(m_lordo), float(m_comm), float(m_netto)]
-                            )
-                        st.session_state["flash"] = "Movimento bancario salvato con successo!"
-                        st.rerun()
-                    except Exception as ex_mb:
-                        st.error(f"Errore durante il salvataggio manuale del movimento: {ex_mb}")
 
 # ---------------------------------------------------------
 # 7. PRIMA NOTA & RENDICONTO ASD
@@ -4098,7 +3944,6 @@ MENU = {
     ],
     "Contabilità": [
         (pagina_prima_nota, "Prima nota, rendiconto e apertura", "📖", "prima-nota"),
-        (pagina_estratti_conto, "Estratti conto", "🏦", "estratti-conto"),
         (pagina_preventivo, "Preventivo e consuntivo", "🎯", "preventivo"),
     ],
     "Impostazioni": [
