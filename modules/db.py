@@ -64,7 +64,6 @@ PIANO_DEI_CONTI_ASD = [
     ('50.02.001', 'Ricavi per Sponsorizzazioni e Pubblicità', 'RICAVO', 3),
     ('50.02.002', 'Contributi da Enti e Associazioni', 'RICAVO', 3),
     ('50.02.003', 'Altri Ricavi Commerciali', 'RICAVO', 3),
-    ('50.02.004', 'Detrazione Forfettaria IVA (L. 398/91)', 'RICAVO', 3),
     ('50.03', 'Proventi Diversi e Straordinari', 'RICAVO', 2),
     ('50.03.001', 'Sopravvenienze Attive', 'RICAVO', 3),
     ('50.03.002', 'Altri Ricavi e Proventi', 'RICAVO', 3),

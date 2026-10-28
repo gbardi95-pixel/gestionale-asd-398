@@ -4,7 +4,7 @@ Descrizioni dall'elenco dei codici tributo dell'Agenzia delle Entrate.
 """
 
 CONTO_IVA = "20.02.001"
-CONTO_DETRAZIONE_IVA = "50.02.004"   # detrazione forfettaria IVA del regime 398/91
+CONTO_DETRAZIONE_IVA = "50.03.001"   # sopravvenienza attiva: detrazione forfettaria IVA del regime 398/91
 CONTO_RITENUTE = "20.02.003"
 CONTO_IMPOSTE = "40.02.004"
 CONTO_SANZIONI = "40.03.003"
@@ -41,7 +41,7 @@ def righe_scrittura(righe, conto_pagamento, detrazione_398=True):
 
     righe: elenco di (codice tributo, periodo di riferimento, importo versato).
     IVA trimestrale nel regime 398: si versa la parte che resta dopo la detrazione forfettaria, quindi il debito IVA
-    che si chiude è più grande del versamento; la differenza è la detrazione, un provento dell'attività commerciale.
+    che si chiude è più grande del versamento; il conto IVA a debito si chiude per intero e la differenza è la detrazione, registrata come sopravvenienza attiva.
     """
     scrittura = []
     for codice, periodo, importo in righe:
@@ -53,7 +53,7 @@ def righe_scrittura(righe, conto_pagamento, detrazione_398=True):
         if gruppo == "IVA_TRIMESTRALE" and detrazione_398:
             iva_chiusa = round(importo * 100 / (100 - PERCENTUALE_DETRAZIONE_398), 2)
             scrittura.append((conto, testo, iva_chiusa, 0.0))
-            scrittura.append((CONTO_DETRAZIONE_IVA, f"Detrazione forfettaria IVA {PERCENTUALE_DETRAZIONE_398}% L. 398/91"
+            scrittura.append((CONTO_DETRAZIONE_IVA, f"Sopravvenienza attiva: detrazione forfettaria IVA {PERCENTUALE_DETRAZIONE_398}% L. 398/91"
                               + (f" ({periodo})" if periodo else ""), 0.0, round(iva_chiusa - importo, 2)))
         else:
             scrittura.append((conto, testo, importo, 0.0))
