@@ -2,6 +2,7 @@ import base64
 import datetime
 import hmac
 import io
+import json
 import os
 import re
 import threading
@@ -2194,10 +2195,43 @@ def pagina_ricevute():
         azioni_ricevute([(int(r_sel["id"]), r_sel["N. Ricevuta"], r_sel["Causale"], float(r_sel["Importo (€)"]))],
                         r_sel["Socio"], vuoto(r_sel["telefono"]), vuoto(r_sel["email"]), "ric_reg")
 
+def pulsante_condividi(file_pdf, testo, chiave):
+    """Pulsante che apre il menu «Condividi» del telefono con i PDF già allegati (WhatsApp, email, …).
+
+    Usa la condivisione del browser: funziona sui telefoni e su alcuni computer; dove non c'è, il pulsante lo dice.
+    file_pdf = [(nome del file, contenuto in byte), ...]
+    """
+    dati = json.dumps({"files": [{"nome": n, "b64": base64.b64encode(b).decode("ascii")} for n, b in file_pdf], "testo": testo})
+    id_b = re.sub(r"\W", "_", f"condividi_{chiave}")
+    st.html(f"""
+<button id="{id_b}" type="button" style="width:100%;padding:0.55rem 0.75rem;border-radius:0.5rem;border:none;cursor:pointer;
+  background:#1F5A96;color:#fff;font-size:1rem;font-family:inherit">📤 Condividi ricevuta (PDF allegato)</button>
+<div id="{id_b}_msg" style="font-size:0.85rem;color:#6b6f76;margin-top:0.3rem"></div>
+<script>
+(function () {{
+  const dati = {dati};
+  const msg = document.getElementById("{id_b}_msg");
+  document.getElementById("{id_b}").addEventListener("click", async () => {{
+    try {{
+      const files = dati.files.map(f => new File([Uint8Array.from(atob(f.b64), c => c.charCodeAt(0))], f.nome, {{type: "application/pdf"}}));
+      if (!navigator.canShare || !navigator.canShare({{files}})) {{
+        msg.textContent = "Questo dispositivo non permette di condividere file dal browser: usa i pulsanti qui sotto e allega il PDF scaricato.";
+        return;
+      }}
+      await navigator.share({{files, text: dati.testo}});
+    }} catch (e) {{
+      if (e.name !== "AbortError") msg.textContent = "Condivisione non riuscita: usa i pulsanti qui sotto.";
+    }}
+  }});
+}})();
+</script>""", unsafe_allow_javascript=True)
+
 def azioni_ricevute(ricevute, nome, telefono, email, chiave):
     """PDF delle ricevute e messaggio pronto per WhatsApp o email (ricevute = [(id, numero, causale, importo), ...])."""
     societa = dati_societa()
     testo = solleciti.testo_ricevuta(nome, [(n, c, i) for _, n, c, i in ricevute], societa.get("denominazione") or NOME_SOCIETA)
+    pulsante_condividi([(f"ricevuta_{str(numero).replace('/', '-')}.pdf", pdf_ricevuta(rid, tuple(sorted(societa.items()))))
+                        for rid, numero, _, _ in ricevute], testo, chiave)
     for rid, numero, _, _ in ricevute:
         st.download_button(f"📄 PDF ricevuta {numero}", pdf_ricevuta(rid, tuple(sorted(societa.items()))),
                            file_name=f"ricevuta_{str(numero).replace('/', '-')}.pdf", mime="application/pdf",
@@ -2209,7 +2243,7 @@ def azioni_ricevute(ricevute, nome, telefono, email, chiave):
     if link_mail:
         st.link_button("✉️ Invia per email", link_mail, width="stretch")
     if link_wa or link_mail:
-        st.caption("Il collegamento apre il messaggio già scritto ma non può allegare il file: scarica il PDF e allegalo tu nella chat o nell'email.")
+        st.caption("«Condividi» allega già il PDF. WhatsApp ed email aprono il messaggio già scritto ma senza file: scarica il PDF e allegalo tu.")
     else:
         st.caption("Telefono ed email mancanti: aggiungili nella scheda della persona per inviare la ricevuta.")
 
