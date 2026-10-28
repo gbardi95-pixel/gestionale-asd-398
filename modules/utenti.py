@@ -147,6 +147,7 @@ ETICHETTE_TABELLE = {
     "distinte_gara": "distinta di gara", "distinte_gara_righe": None, "eventi_squadra": "convocazione/allenamento",
     "presenze_evento": "presenze", "impostazioni": "impostazioni", "piano_dei_conti": "piano dei conti",
     "parametri_stagione": "parametri stagione", "preventivi": "preventivo", "utenti": "utenti",
+    "esercizi_chiusi": "chiusura esercizio", "registro_attivita": None,
 }
 VERBI = {"INSERT": "inserito", "UPDATE": "modificato", "DELETE": "eliminato", "REPLACE": "inserito"}
 _SQL_SCRITTURA = re.compile(r"^\s*(INSERT|UPDATE|DELETE|REPLACE)\b(?:\s+OR\s+\w+)?(?:\s+INTO|\s+FROM)?\s+[\"'`]?(\w+)", re.IGNORECASE)
@@ -190,6 +191,8 @@ class ConnessioneRegistrata:
                 dettaglio = str(parametri[2])[:120]  # causale della registrazione
             elif op == ("INSERT", "utenti") and parametri:
                 dettaglio = str(parametri[0])  # nome utente creato
+            elif op[1] == "esercizi_chiusi" and parametri:
+                dettaglio = str(parametri[0])  # esercizio chiuso o riaperto
             self.operazioni.append((op[0], op[1], dettaglio))
         return self._conn.execute(sql, *args, **kwargs)
 

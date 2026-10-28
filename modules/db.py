@@ -172,6 +172,9 @@ def versione_schema_db():
         conn.close()
 
 
+ERRORE_ESERCIZIO_CHIUSO = "ESERCIZIO_CHIUSO"  # messaggio dei trigger, riconosciuto dall'app per spiegare il blocco
+
+
 def init_db(versione_schema=None):
     """Inizializza le tabelle e popola automaticamente il Piano dei Conti se vuoto.
 
@@ -589,6 +592,33 @@ def init_db(versione_schema=None):
         importo REAL NOT NULL
     );
     """)
+
+    # Esercizi chiusi dopo l'approvazione del rendiconto: restano consultabili, ma i trigger impediscono di registrare,
+    # modificare o eliminare movimenti di prima nota con data nel periodo, da qualunque pagina
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS esercizi_chiusi (
+        esercizio TEXT PRIMARY KEY,
+        data_inizio TEXT NOT NULL,
+        data_fine TEXT NOT NULL,
+        chiuso_il TEXT,
+        chiuso_da TEXT,
+        note TEXT
+    );
+    """)
+    periodo_chiuso = "EXISTS (SELECT 1 FROM esercizi_chiusi WHERE {data} BETWEEN data_inizio AND data_fine)"
+    data_movimento = "(SELECT data_registrazione FROM movimenti_prima_nota WHERE id = {riga}.movimento_id)"
+    for nome, evento, tabella, condizione in (
+        ("blocco_movimenti_inserimento", "INSERT", "movimenti_prima_nota", periodo_chiuso.format(data="NEW.data_registrazione")),
+        ("blocco_movimenti_modifica", "UPDATE", "movimenti_prima_nota",
+         periodo_chiuso.format(data="OLD.data_registrazione") + " OR " + periodo_chiuso.format(data="NEW.data_registrazione")),
+        ("blocco_movimenti_eliminazione", "DELETE", "movimenti_prima_nota", periodo_chiuso.format(data="OLD.data_registrazione")),
+        ("blocco_righe_inserimento", "INSERT", "righe_prima_nota", periodo_chiuso.format(data=data_movimento.format(riga="NEW"))),
+        ("blocco_righe_modifica", "UPDATE", "righe_prima_nota",
+         periodo_chiuso.format(data=data_movimento.format(riga="OLD")) + " OR " + periodo_chiuso.format(data=data_movimento.format(riga="NEW"))),
+        ("blocco_righe_eliminazione", "DELETE", "righe_prima_nota", periodo_chiuso.format(data=data_movimento.format(riga="OLD"))),
+    ):
+        cursor.execute(f"CREATE TRIGGER IF NOT EXISTS {nome} BEFORE {evento} ON {tabella} WHEN {condizione} "
+                       f"BEGIN SELECT RAISE(ABORT, '{ERRORE_ESERCIZIO_CHIUSO}'); END;")
 
     # Migrazione: socio di un'altra società, qui tesserato solo con la scheda attività
     try:

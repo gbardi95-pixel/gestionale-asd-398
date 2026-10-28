@@ -13,14 +13,14 @@ import streamlit as st
 from contextlib import contextmanager
 from modules import backup, distinte, esercizio, estratti, f24, lavoro_sportivo, libro_soci, preventivo, quote, rendiconto_pdf, ricevuta_pdf, scadenze, solleciti, squadra, tesseramento, utenti
 from modules import cap as cap_comuni
-from modules.db import PIANO_DEI_CONTI_ASD, _turso_credentials, connessione_replica, get_connection, init_db, usa_turso, versione_schema_db
+from modules.db import ERRORE_ESERCIZIO_CHIUSO, PIANO_DEI_CONTI_ASD, _turso_credentials, connessione_replica, get_connection, init_db, usa_turso, versione_schema_db
 
 # ---------------------------------------------------------
 # INIZIALIZZAZIONE & CACHING RESOURCE DB
 # ---------------------------------------------------------
 # Incrementare a ogni modifica dello schema del DB: forza init_db() (e le migrazioni)
 # anche quando Streamlit Cloud aggiorna il codice senza riavviare il server.
-VERSIONE_SCHEMA_DB = 14
+VERSIONE_SCHEMA_DB = 15
 
 @st.cache_resource(show_spinner="Avvio dell'app…")
 def _setup_database(versione_schema):
@@ -201,11 +201,15 @@ def db_write():
         conn.commit()
         sincronizza_letture()  # la copia locale per le letture riceve subito la modifica
         st.cache_data.clear()  # i dati sono cambiati: le letture in memoria vanno rifatte
-    except Exception:
+    except Exception as ex:
         try:
             conn.rollback()
         except Exception:
             pass
+        if ERRORE_ESERCIZIO_CHIUSO in str(ex):
+            st.error("Non salvato: la data cade in un esercizio chiuso dopo l'approvazione del rendiconto. "
+                     "Per correggerlo l'amministratore deve prima riaprirlo (Prima nota → Apertura e chiusura esercizio).")
+            st.stop()
         raise
     finally:
         conn.close()
@@ -2734,7 +2738,7 @@ def pagina_prima_nota():
     st.subheader("📖 Giornale di Prima Nota e Rendiconto Economico Finanziario ASD")
 
     tab_giornale, tab_rendiconto, tab_apertura, tab_f24, tab_estratti = st.tabs([
-        "Giornale di Prima Nota (Partita Doppia)", "Rendiconto Economico Finanziario", "📂 Apertura esercizio", "🧾 Versamenti F24",
+        "Giornale di Prima Nota (Partita Doppia)", "Rendiconto Economico Finanziario", "📂 Apertura e chiusura esercizio", "🧾 Versamenti F24",
         "🏦 Controllo estratto conto"])
 
     with tab_giornale:
@@ -3146,6 +3150,64 @@ def pagina_prima_nota():
                         del st.session_state[chiave]
                     st.session_state["flash"] = f"Apertura dell'esercizio {es_sel} eliminata."
                     st.rerun()
+
+        st.divider()
+        st.markdown("### 🔒 Chiusura dell'esercizio")
+        st.caption("Dopo l'approvazione del rendiconto in assemblea l'esercizio si chiude: resta consultabile (giornale, rendiconto, PDF, "
+                   "esportazioni), ma non si possono più registrare, modificare o eliminare movimenti con data in quel periodo, "
+                   "da nessuna pagina. Chiude e riapre solo l'amministratore; ogni chiusura e riapertura resta nel registro attività.")
+        df_chiusi = leggi_df("SELECT esercizio, data_inizio, data_fine, chiuso_il, chiuso_da, note FROM esercizi_chiusi ORDER BY data_inizio DESC")
+        if df_chiusi.empty:
+            st.info("Nessun esercizio chiuso.")
+        else:
+            st.dataframe(pd.DataFrame({
+                "Esercizio": df_chiusi["esercizio"],
+                "Periodo": [f"{datetime.date.fromisoformat(a):%d/%m/%Y} – {datetime.date.fromisoformat(b):%d/%m/%Y}"
+                            for a, b in zip(df_chiusi["data_inizio"], df_chiusi["data_fine"])],
+                "Chiuso il": df_chiusi["chiuso_il"].fillna(""), "Da": df_chiusi["chiuso_da"].fillna(""),
+                "Approvazione": df_chiusi["note"].fillna("")}), width="stretch", hide_index=True)
+        if utente_corrente()["ruolo"] != "ADMIN":
+            st.caption("Solo l'amministratore può chiudere o riaprire un esercizio.")
+        else:
+            chiusi = set(df_chiusi["esercizio"])
+            periodi_ch = dict(periodi)
+            for r in df_chiusi.itertuples():  # anche gli esercizi chiusi più vecchi, per poterli riaprire
+                periodi_ch.setdefault(r.esercizio, (datetime.date.fromisoformat(r.data_inizio), datetime.date.fromisoformat(r.data_fine)))
+            elenco_ch = sorted(periodi_ch, reverse=True)
+            # Di norma si chiude l'esercizio prima di quello in corso
+            prec_ch = esercizio.esercizio_precedente(periodi[etich_corrente][0], mese_ini)[2]
+            es_ch = st.selectbox("Esercizio da chiudere o riaprire", elenco_ch, index=elenco_ch.index(prec_ch) if prec_ch in elenco_ch else 0, key="es_chiusura")
+            ini_ch, fin_ch = periodi_ch[es_ch]
+            if es_ch not in chiusi:
+                with st.form("chiudi_esercizio", clear_on_submit=True):
+                    st.markdown(f"Chiudi l'esercizio **{es_ch}** (dal {ini_ch:%d/%m/%Y} al {fin_ch:%d/%m/%Y})")
+                    appr_ch = st.text_input("Approvazione del rendiconto", placeholder="es. assemblea dei soci del gg/mm/aaaa")
+                    conf_ch = st.checkbox("Confermo: il rendiconto è approvato e i movimenti del periodo non vanno più cambiati")
+                    if st.form_submit_button("🔒 Chiudi l'esercizio", type="primary"):
+                        if not conf_ch:
+                            st.error("Spunta la conferma per chiudere l'esercizio.")
+                        else:
+                            with db_write() as w_conn:
+                                w_conn.execute("INSERT INTO esercizi_chiusi (esercizio, data_inizio, data_fine, chiuso_il, chiuso_da, note) "
+                                               "VALUES (?, ?, ?, ?, ?, ?)",
+                                               [es_ch, str(ini_ch), str(fin_ch), datetime.datetime.now().strftime("%d/%m/%Y %H:%M"),
+                                                etichetta_utente(utente_corrente()), appr_ch.strip() or None])
+                            st.session_state["flash"] = f"Esercizio {es_ch} chiuso: i suoi movimenti non si possono più modificare."
+                            st.rerun()
+            else:
+                with st.form("riapri_esercizio", clear_on_submit=True):
+                    st.markdown(f"L'esercizio **{es_ch}** è chiuso. Riaprilo solo per correggere un errore, poi richiudilo.")
+                    motivo_ch = st.text_input("Motivo della riapertura")
+                    if st.form_submit_button("🔓 Riapri l'esercizio"):
+                        if not motivo_ch.strip():
+                            st.error("Scrivi il motivo della riapertura: resta nel registro attività.")
+                        else:
+                            with db_write() as w_conn:
+                                w_conn.execute("DELETE FROM esercizi_chiusi WHERE esercizio = ?", [es_ch])
+                                utenti.annota(w_conn, etichetta_utente(utente_corrente()), pagina_corrente(),
+                                              f"esercizio {es_ch} riaperto: {motivo_ch.strip()}")
+                            st.session_state["flash"] = f"Esercizio {es_ch} riaperto."
+                            st.rerun()
 
     with tab_f24:
         st.markdown("### 🧾 Versamenti con modello F24")

@@ -221,8 +221,10 @@ def script_ripristino(conn, tabelle):
     """
     esistenti = set(elenco_tabelle(conn)) - TABELLE_NON_RIPRISTINATE
     istruzioni = ["PRAGMA foreign_keys = OFF;", "BEGIN;"]
+    if "esercizi_chiusi" in esistenti:
+        istruzioni.append('DELETE FROM "esercizi_chiusi";')  # i blocchi tornano alla fine, con la prima nota già sostituita
     conteggi = {}
-    for nome, (colonne, righe) in tabelle.items():
+    for nome, (colonne, righe) in sorted(tabelle.items(), key=lambda t: t[0] == "esercizi_chiusi"):
         if nome not in esistenti:
             continue
         info = conn.execute(f'PRAGMA table_info("{nome}")').fetchall()
