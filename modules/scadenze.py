@@ -3,7 +3,7 @@
 Fonti:
 - IVA trimestrale 398/91: F24 entro il 16 del secondo mese dopo il trimestre, senza maggiorazione (codici 6031-6034)
   https://www.studiopizzano.it/termini-e-modalita-di-versamento-delle-imposte-per-le-associazioni-sportive-dilettantische
-- Soglia 398/91: proventi commerciali (incassati, criterio di cassa) non oltre 400.000 € nel periodo d'imposta precedente; superata in corso d'anno,
+- Soglia 398/91: proventi commerciali (criterio di cassa; per prudenza le fatture emesse contano come incassate) non oltre 400.000 € nel periodo d'imposta precedente; superata in corso d'anno,
   il regime cessa dal mese successivo (L. 232/2016, art. 1 c. 50) https://www.ecnews.it/fiscale/fisco-e-patrimonio/enti-non-commerciali/regime-398-ambito-soggettivo-soglia-ricavi/
 - Ritenute e contributi sui compensi: di norma entro il 16 del mese dopo il pagamento (da confermare con il consulente del lavoro).
 - Modello Redditi ENC e 770: 31 ottobre; saldo IRES: 30 giugno (o 30 luglio con lo 0,40% in più); Certificazione Unica: 16 marzo.

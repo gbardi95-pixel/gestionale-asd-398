@@ -474,16 +474,22 @@ def saldi_conti_prima_del(data):
         """, [str(data)])
     return {r.codice: round(float(r.saldo), 2) for r in df.itertuples()}
 
-def proventi_commerciali_incassati(anno):
-    """Proventi commerciali incassati nell'anno, senza IVA: incassi dagli sponsor (scorporando l'IVA in proporzione alle loro
-    fatture) e ricavi commerciali registrati direttamente con banca, cassa o PayPal. Serve per la soglia del regime 398."""
+def proventi_commerciali_soglia_398(anno):
+    """Proventi commerciali dell'anno per la soglia del regime 398, senza IVA, con criterio prudente: per ogni sponsor conta
+    il maggiore tra le fatture emesse nell'anno (si presumono incassate all'emissione) e gli incassi dell'anno (che possono
+    riguardare fatture degli anni prima); in più i ricavi commerciali registrati direttamente con banca, cassa o PayPal."""
     sponsor = leggi_df(
         """
-        SELECT COALESCE(SUM(i.importo * COALESCE(
-            (SELECT SUM(f.imponibile) / SUM(f.totale_fattura) FROM fatture_sponsor_398 f WHERE f.sponsor_id = i.sponsor_id),
-            100.0 / 122)), 0.0) AS tot
-        FROM incassi_sponsor i WHERE strftime('%Y', i.data_incasso) = ?
-        """, [str(anno)])["tot"].iloc[0]
+        SELECT COALESCE(SUM(MAX(fatturato, incassato)), 0.0) AS tot FROM (
+            SELECT s.sponsor_id,
+                   (SELECT COALESCE(SUM(f.imponibile), 0) FROM fatture_sponsor_398 f
+                    WHERE f.sponsor_id = s.sponsor_id AND strftime('%Y', f.data_fattura) = ?) AS fatturato,
+                   (SELECT COALESCE(SUM(i.importo), 0) FROM incassi_sponsor i
+                    WHERE i.sponsor_id = s.sponsor_id AND strftime('%Y', i.data_incasso) = ?) * COALESCE(
+                       (SELECT SUM(f.imponibile) / SUM(f.totale_fattura) FROM fatture_sponsor_398 f WHERE f.sponsor_id = s.sponsor_id),
+                       100.0 / 122) AS incassato
+            FROM (SELECT sponsor_id FROM fatture_sponsor_398 UNION SELECT sponsor_id FROM incassi_sponsor) s)
+        """, [str(anno), str(anno)])["tot"].iloc[0]
     diretti = leggi_df(
         """
         SELECT COALESCE(SUM(r.avere - r.dare), 0.0) AS tot
@@ -821,11 +827,11 @@ def pagina_dashboard():
     st.caption("Calcolate da IVA, ritenute e contributi registrati in prima nota e non ancora chiusi con un F24: quando registri l'F24 la scadenza sparisce. "
                "Date e codici da confermare con il commercialista e il consulente del lavoro.")
 
-    # Soglia del regime 398/91: proventi commerciali incassati nell'anno (criterio di cassa), al netto dell'IVA
-    incassati_398 = proventi_commerciali_incassati(oggi_sc.year)
+    # Soglia del regime 398/91: proventi commerciali dell'anno al netto dell'IVA, fatture non ancora incassate comprese
+    incassati_398 = proventi_commerciali_soglia_398(oggi_sc.year)
     quota_soglia = incassati_398 / scadenze.SOGLIA_398
     st.progress(min(max(quota_soglia, 0.0), 1.0),
-                text=f"Regime 398: proventi commerciali incassati nel {oggi_sc.year} € {incassati_398:,.2f} su € {scadenze.SOGLIA_398:,.0f} ({quota_soglia:.1%})")
+                text=f"Regime 398: proventi commerciali {oggi_sc.year} (fatture emesse o incassi) € {incassati_398:,.2f} su € {scadenze.SOGLIA_398:,.0f} ({quota_soglia:.1%})")
     if quota_soglia >= 1:
         st.error("⛔ Soglia del regime 398 superata: dal mese successivo si applica il regime ordinario. Contatta subito il commercialista.")
     elif quota_soglia >= 0.8:
