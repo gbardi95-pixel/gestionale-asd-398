@@ -474,6 +474,28 @@ def saldi_conti_prima_del(data):
         """, [str(data)])
     return {r.codice: round(float(r.saldo), 2) for r in df.itertuples()}
 
+def proventi_commerciali_incassati(anno):
+    """Proventi commerciali incassati nell'anno, senza IVA: incassi dagli sponsor (scorporando l'IVA in proporzione alle loro
+    fatture) e ricavi commerciali registrati direttamente con banca, cassa o PayPal. Serve per la soglia del regime 398."""
+    sponsor = leggi_df(
+        """
+        SELECT COALESCE(SUM(i.importo * COALESCE(
+            (SELECT SUM(f.imponibile) / SUM(f.totale_fattura) FROM fatture_sponsor_398 f WHERE f.sponsor_id = i.sponsor_id),
+            100.0 / 122)), 0.0) AS tot
+        FROM incassi_sponsor i WHERE strftime('%Y', i.data_incasso) = ?
+        """, [str(anno)])["tot"].iloc[0]
+    diretti = leggi_df(
+        """
+        SELECT COALESCE(SUM(r.avere - r.dare), 0.0) AS tot
+        FROM righe_prima_nota r
+        JOIN movimenti_prima_nota m ON m.id = r.movimento_id
+        JOIN piano_dei_conti p ON p.id = r.sottoconto_id
+        WHERE p.codice LIKE '50.02.%' AND strftime('%Y', m.data_registrazione) = ?
+          AND EXISTS (SELECT 1 FROM righe_prima_nota c JOIN piano_dei_conti pc ON pc.id = c.sottoconto_id
+                      WHERE c.movimento_id = m.id AND pc.codice LIKE '10.01.%')
+        """, [str(anno)])["tot"].iloc[0]
+    return round(float(sponsor) + float(diretti), 2)
+
 def movimenti_costi_ricavi(inizio, fine):
     """Totali dare e avere di ogni conto di costo e di ricavo nel periodo (per preventivo e rendiconto)."""
     return leggi_df(
@@ -799,10 +821,11 @@ def pagina_dashboard():
     st.caption("Calcolate da IVA, ritenute e contributi registrati in prima nota e non ancora chiusi con un F24: quando registri l'F24 la scadenza sparisce. "
                "Date e codici da confermare con il commercialista e il consulente del lavoro.")
 
-    # Soglia del regime 398/91 sui proventi commerciali dell'anno
-    quota_soglia = att_corr[2] / scadenze.SOGLIA_398
+    # Soglia del regime 398/91: proventi commerciali incassati nell'anno (criterio di cassa), al netto dell'IVA
+    incassati_398 = proventi_commerciali_incassati(oggi_sc.year)
+    quota_soglia = incassati_398 / scadenze.SOGLIA_398
     st.progress(min(max(quota_soglia, 0.0), 1.0),
-                text=f"Regime 398: proventi commerciali {oggi_sc.year} € {att_corr[2]:,.2f} su € {scadenze.SOGLIA_398:,.0f} ({quota_soglia:.1%})")
+                text=f"Regime 398: proventi commerciali incassati nel {oggi_sc.year} € {incassati_398:,.2f} su € {scadenze.SOGLIA_398:,.0f} ({quota_soglia:.1%})")
     if quota_soglia >= 1:
         st.error("⛔ Soglia del regime 398 superata: dal mese successivo si applica il regime ordinario. Contatta subito il commercialista.")
     elif quota_soglia >= 0.8:
