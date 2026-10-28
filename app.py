@@ -3,6 +3,7 @@ import datetime
 import hmac
 import io
 import os
+import re
 import threading
 import time
 import urllib.parse
@@ -10,7 +11,7 @@ import warnings
 import pandas as pd
 import streamlit as st
 from contextlib import contextmanager
-from modules import backup, distinte, esercizio, lavoro_sportivo, libro_soci, preventivo, quote, rendiconto_pdf, ricevuta_pdf, solleciti, squadra, tesseramento, utenti
+from modules import backup, distinte, esercizio, f24, lavoro_sportivo, libro_soci, preventivo, quote, rendiconto_pdf, ricevuta_pdf, solleciti, squadra, tesseramento, utenti
 from modules import cap as cap_comuni
 from modules.db import PIANO_DEI_CONTI_ASD, _turso_credentials, connessione_replica, get_connection, init_db, usa_turso, versione_schema_db
 
@@ -19,7 +20,7 @@ from modules.db import PIANO_DEI_CONTI_ASD, _turso_credentials, connessione_repl
 # ---------------------------------------------------------
 # Incrementare a ogni modifica dello schema del DB: forza init_db() (e le migrazioni)
 # anche quando Streamlit Cloud aggiorna il codice senza riavviare il server.
-VERSIONE_SCHEMA_DB = 13
+VERSIONE_SCHEMA_DB = 14
 
 @st.cache_resource(show_spinner="Avvio dell'app…")
 def _setup_database(versione_schema):
@@ -403,10 +404,12 @@ def dati_societa():
 
 @st.cache_data(show_spinner=False, max_entries=50)
 def pdf_ricevuta(ricevuta_id, societa_tuple):
-    """PDF di una ricevuta registrata (tenuto in memoria finché i dati non cambiano)."""
+    """PDF di una ricevuta registrata: la copia salvata all'emissione, oppure (ricevute più vecchie) rigenerato dai dati."""
     r = leggi_df(
         "SELECT r.*, a.denominazione, a.codice_fiscale FROM ricevute_istituzionali r JOIN anagrafiche a ON a.id = r.anagrafica_id WHERE r.id = ?",
         [int(ricevuta_id)]).iloc[0]
+    if r.get("pdf_base64") is not None and pd.notna(r.get("pdf_base64")) and str(r["pdf_base64"]):
+        return base64.b64decode(str(r["pdf_base64"]))
     testo = lambda v: "" if v is None or pd.isna(v) else str(v).strip()
     data = pd.to_datetime(r["data_emissione"], errors="coerce")
     return ricevuta_pdf.genera(dict(societa_tuple), {
@@ -415,6 +418,36 @@ def pdf_ricevuta(ricevuta_id, societa_tuple):
         "versante": testo(r.get("versante_nome")), "versante_cf": testo(r.get("versante_cf")),
         "causale": testo(r["causale"]), "importo": float(r["importo"]), "pagamento": testo(r["modalita_pagamento"]) or "da completare",
         "bollo": float(r["marca_da_bollo"] or 0)})
+
+def emetti_ricevuta(w_conn, numero, data, anagrafica_id, tipo_causale, dettaglio, importo, pagamento, pregresso=False,
+                    versante_nome="", versante_cf="", nome_socio=""):
+    """Registra la ricevuta, la scrittura di prima nota e la copia del PDF com'è al momento dell'emissione."""
+    causale = f"{tipo_causale} - {dettaglio}".strip(" -")
+    cod_cassa = {"BONIFICO": "10.01.001", "POS": "10.01.001", "PAYPAL": "10.01.003"}.get(pagamento, "10.01.002")
+    cod_ricavo = "50.01.003" if tipo_causale == CAUSALE_EROGAZIONE else ("50.01.001" if "Annua" in tipo_causale else "50.01.002")
+    if pregresso:
+        cod_ricavo = esercizio.CONTO_CREDITI_SOCI  # si incassa un credito, non un nuovo ricavo
+    rid = w_conn.execute(
+        "INSERT INTO ricevute_istituzionali (numero_ricevuta, data_emissione, anagrafica_id, causale, importo, modalita_pagamento, marca_da_bollo, "
+        "credito_pregresso, versante_nome, versante_cf) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        # bollo 0: ASD esenti dall'imposta di bollo, art. 27-bis Tabella B DPR 642/1972 (art. 90 c. 6 L. 289/2002)
+        [str(numero).strip(), str(data), int(anagrafica_id), causale, float(importo), str(pagamento), 0.0, int(pregresso),
+         (versante_nome or "").strip() or None, (versante_cf or "").strip().upper() or None]).lastrowid
+    post_journal(w_conn, data, numero, f"Incasso {tipo_causale} - {nome_socio}".strip(" -"), "ISTITUZIONALE", [
+        (get_conto_id(w_conn, cod_cassa), f"Incasso {tipo_causale}", float(importo), 0.0),
+        (get_conto_id(w_conn, cod_ricavo), "Incasso credito verso socio" if pregresso else "Ricavo Istituzionale", 0.0, float(importo))])
+    den, cf = w_conn.execute("SELECT denominazione, codice_fiscale FROM anagrafiche WHERE id = ?", [int(anagrafica_id)]).fetchone()
+    pdf = ricevuta_pdf.genera(dati_societa(), {
+        "numero": str(numero).strip(), "data": pd.Timestamp(data).strftime("%d/%m/%Y"), "praticante": den or "", "praticante_cf": cf or "",
+        "versante": (versante_nome or "").strip(), "versante_cf": (versante_cf or "").strip().upper(), "causale": causale,
+        "importo": float(importo), "pagamento": str(pagamento), "bollo": 0.0})
+    w_conn.execute("UPDATE ricevute_istituzionali SET pdf_base64 = ? WHERE id = ?", [base64.b64encode(pdf).decode("ascii"), rid])
+    return rid
+
+def numero_successivo(numero):
+    """Numero di ricevuta che segue (es. 7/2026 -> 8/2026), None se il formato non è numero/anno."""
+    m = re.fullmatch(r"\s*(\d+)\s*/\s*(\d{4})\s*", str(numero))
+    return f"{int(m.group(1)) + 1}/{m.group(2)}" if m else None
 
 def mese_inizio_esercizio():
     """Mese di inizio dell'esercizio sociale (1 = anno solare, 7 = stagione sportiva 1/7-30/6), impostabile dall'app."""
@@ -1947,6 +1980,11 @@ def pagina_ricevute():
             pregresso = st.checkbox(
                 "Incasso di una quota degli esercizi precedenti (già inserita tra i crediti di apertura)",
                 help="La ricevuta riduce il credito verso il socio invece di registrare un nuovo ricavo, che è già stato contato nell'esercizio in cui la quota era dovuta.")
+            dividi_erog = st.checkbox(
+                "Se si versa più della quota ancora dovuta, la parte in più è un'erogazione liberale (due ricevute)", value=True,
+                help="Solo la parte versata volontariamente oltre la quota ordinaria può essere un'erogazione liberale (Agenzia delle Entrate, "
+                     "risoluzione 59/E del 2017): l'app emette una ricevuta per la quota e una per l'erogazione. "
+                     "Togli la spunta se la somma in più è un errore da restituire o riguarda un'altra persona.")
 
             if st.form_submit_button("Emetti Ricevuta e Registra in Prima Nota"):
                 socio_altrove_ric = leggi_df("SELECT COALESCE(MAX(socio_altra_societa), 0) AS s FROM tesserati_calcio WHERE anagrafica_id = ?",
@@ -1957,40 +1995,44 @@ def pagina_ricevute():
                     st.error("Questa persona è socia di un'altra società e qui ha solo la scheda attività: non può versare la quota associativa. "
                              "Scegli «Quota Iscrizione e Frequenza Campionato».")
                 elif importo > 0:
-                    causale_completa = f"{tipo_causale} - {causale_custom}"
-                    bollo = 0.00  # ASD esenti dall'imposta di bollo: art. 27-bis Tabella B DPR 642/1972 (art. 90 c. 6 L. 289/2002)
-                    # BONIFICO e POS vanno in banca, PAYPAL sul conto PayPal, CONTANTI in cassa
-                    cod_cassa_banca = {"BONIFICO": "10.01.001", "POS": "10.01.001", "PAYPAL": "10.01.003"}.get(pagamento, "10.01.002")
-                    cod_ricavo = "50.01.003" if tipo_causale == CAUSALE_EROGAZIONE else ("50.01.001" if "Annua" in tipo_causale else "50.01.002")
-                    if pregresso:
-                        cod_ricavo = esercizio.CONTO_CREDITI_SOCI  # si incassa un credito, non un nuovo ricavo
-
+                    aid_ric = int(soci_dict[socio_sel])
+                    nome_ric = socio_sel.split(" (CF:")[0]
+                    # Divisione automatica: quota ancora dovuta nell'esercizio della ricevuta, il resto come erogazione liberale
+                    quota_ric, erog_ric = round(float(importo), 2), 0.0
+                    if dividi_erog and tipo_causale != CAUSALE_EROGAZIONE and not pregresso:
+                        ini_q, fin_q, etich_q = esercizio.periodo_esercizio(data_ric, mese_inizio_esercizio())
+                        df_t_q, df_v_q = dati_quote(ini_q, fin_q)
+                        sit_q = quote.situazione_quote(df_t_q, parametri_esercizio(etich_q), df_v_q)
+                        riga_q = sit_q[sit_q["anagrafica_id"] == aid_ric]
+                        if not riga_q.empty:
+                            quota_ric, erog_ric = quote.dividi_versamento(importo, float(riga_q["Da versare (€)"].iloc[0]))
+                    num_erog = numero_successivo(num_ric) if erog_ric and quota_ric else None
                     try:
+                        if erog_ric and not quota_ric:
+                            raise ValueError("Questa persona ha già versato tutta la quota dell'esercizio. Se la somma è un'erogazione liberale scegli "
+                                             "la tipologia «Erogazione Liberale»; se è la quota di un'altra persona emetti la ricevuta a suo nome "
+                                             "(con «Pagato da»); altrimenti togli la spunta sulla divisione automatica.")
+                        if erog_ric and not num_erog:
+                            raise ValueError("Per emettere due ricevute il numero deve essere nella forma numero/anno (es. 12/2026).")
                         conn = get_ro_conn()
                         try:
-                            errore_num = controlla_numero_documento(conn, "ricevute_istituzionali", "numero_ricevuta", num_ric, data_ric.year)
-                            acc_fin = get_conto_id(conn, cod_cassa_banca)
-                            acc_ric = get_conto_id(conn, cod_ricavo)
+                            errore_num = controlla_numero_documento(conn, "ricevute_istituzionali", "numero_ricevuta", num_ric, data_ric.year) or (
+                                controlla_numero_documento(conn, "ricevute_istituzionali", "numero_ricevuta", num_erog, data_ric.year) if num_erog else None)
                         finally:
                             conn.close()
                         if errore_num:
                             raise ValueError(errore_num)
 
                         with db_write() as w_conn:
-                            w_conn.execute(
-                                "INSERT INTO ricevute_istituzionali (numero_ricevuta, data_emissione, anagrafica_id, causale, importo, modalita_pagamento, marca_da_bollo, "
-                                "credito_pregresso, versante_nome, versante_cf) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                                [str(num_ric).strip(), str(data_ric), int(soci_dict[socio_sel]), str(causale_completa).strip(), float(importo), str(pagamento),
-                                 float(bollo), int(pregresso), versante_nome.strip() or None, versante_cf.strip().upper() or None]
-                            )
+                            emetti_ricevuta(w_conn, num_ric, data_ric, aid_ric, tipo_causale, causale_custom, quota_ric, pagamento, pregresso,
+                                            versante_nome, versante_cf, nome_ric)
+                            if num_erog:
+                                emetti_ricevuta(w_conn, num_erog, data_ric, aid_ric, CAUSALE_EROGAZIONE, causale_custom, erog_ric, pagamento, False,
+                                                versante_nome, versante_cf, nome_ric)
 
-                            righe_journal = [
-                                (acc_fin, f"Incasso {tipo_causale}", float(importo), 0.0),
-                                (acc_ric, "Incasso credito verso socio" if pregresso else "Ricavo Istituzionale", 0.0, float(importo))
-                            ]
-                            post_journal(w_conn, data_ric, num_ric, f"Incasso {tipo_causale} - {socio_sel}", "ISTITUZIONALE", righe_journal)
-
-                        st.session_state["flash"] = f"Ricevuta N. {num_ric} emessa e contabilizzata con successo! Il PDF si scarica dal registro qui sotto."
+                        st.session_state["flash"] = (
+                            f"Ricevute N. {num_ric} (quota € {quota_ric:,.2f}) e N. {num_erog} (erogazione liberale € {erog_ric:,.2f}) emesse e contabilizzate."
+                            if num_erog else f"Ricevuta N. {num_ric} emessa e contabilizzata con successo!") + " Il PDF si scarica dal registro qui sotto."
                         st.rerun()
                     except Exception as ex_ric:
                         st.error(f"Errore durante l'emissione della ricevuta: {ex_ric}")
@@ -2609,7 +2651,8 @@ def pagina_estratti_conto():
 def pagina_prima_nota():
     st.subheader("📖 Giornale di Prima Nota e Rendiconto Economico Finanziario ASD")
 
-    tab_giornale, tab_rendiconto, tab_apertura = st.tabs(["Giornale di Prima Nota (Partita Doppia)", "Rendiconto Economico Finanziario", "📂 Apertura esercizio"])
+    tab_giornale, tab_rendiconto, tab_apertura, tab_f24 = st.tabs(["Giornale di Prima Nota (Partita Doppia)", "Rendiconto Economico Finanziario",
+                                                                    "📂 Apertura esercizio", "🧾 Versamenti F24"])
 
     with tab_giornale:
         with st.expander("➕ Nuova Registrazione Manuale (Uscite / Spese / Incassi Generici)"):
@@ -2682,10 +2725,11 @@ def pagina_prima_nota():
                         "UNION ALL SELECT 'incasso_sponsor', CAST(id AS TEXT) FROM incassi_sponsor WHERE movimento_id = ? "
                         "UNION ALL SELECT 'spesa', CAST(id AS TEXT) FROM fatture_passive WHERE movimento_id = ? "
                         "UNION ALL SELECT 'compenso', CAST(id AS TEXT) FROM compensi_sportivi WHERE movimento_id = ? "
+                        "UNION ALL SELECT 'f24', CAST(id AS TEXT) FROM versamenti_f24 WHERE movimento_id = ? "
                         "UNION ALL SELECT 'pagamento_spesa', CAST(id AS TEXT) FROM fatture_passive WHERE movimento_pagamento_id = ? "
                         "UNION ALL SELECT 'ricevuta', numero_ricevuta FROM ricevute_istituzionali WHERE numero_ricevuta = ? AND data_emissione = ? "
                         "UNION ALL SELECT 'fattura', numero_fattura FROM fatture_sponsor_398 WHERE numero_fattura = ? AND data_fattura = ?",
-                        [mov_sel, mov_sel, mov_sel, mov_sel, mov_sel, str(testata["numero_documento"]), str(testata["data_registrazione"]),
+                        [mov_sel, mov_sel, mov_sel, mov_sel, mov_sel, mov_sel, str(testata["numero_documento"]), str(testata["data_registrazione"]),
                          str(testata["numero_documento"]), str(testata["data_registrazione"])])
                     tipi_coll = set(collegamenti["tipo"])
                     if "apertura" in tipi_coll:
@@ -2700,6 +2744,9 @@ def pagina_prima_nota():
                         if "spesa" in tipi_coll or "pagamento_spesa" in tipi_coll:
                             st.warning("Questa registrazione è collegata al registro spese: se la modifichi, l'importo nel registro non cambia; "
                                        "se la elimini, viene eliminata la spesa (o, per un pagamento, la spesa torna «da pagare»).")
+                        if "f24" in tipi_coll:
+                            st.warning("Questa registrazione è un versamento F24: se la modifichi, i codici tributo nella scheda «🧾 Versamenti F24» "
+                                       "non cambiano; se la elimini, viene eliminato anche il versamento.")
                         if "incasso_sponsor" in tipi_coll:
                             st.warning("Questa registrazione è collegata a un incasso da sponsor: se la modifichi, l'importo dell'incasso nella pagina Sponsor "
                                        "non cambia; se la elimini, viene eliminato anche l'incasso.")
@@ -2770,6 +2817,8 @@ def pagina_prima_nota():
                                                    "WHERE movimento_pagamento_id = ? AND movimento_id <> ?", [int(mov_sel), int(mov_sel)])
                                     w_conn.execute("DELETE FROM fatture_passive WHERE movimento_id = ?", [int(mov_sel)])
                                     w_conn.execute("DELETE FROM compensi_sportivi WHERE movimento_id = ?", [int(mov_sel)])
+                                    w_conn.execute("DELETE FROM righe_f24 WHERE versamento_id IN (SELECT id FROM versamenti_f24 WHERE movimento_id = ?)", [int(mov_sel)])
+                                    w_conn.execute("DELETE FROM versamenti_f24 WHERE movimento_id = ?", [int(mov_sel)])
                                     w_conn.execute("DELETE FROM righe_prima_nota WHERE movimento_id = ?", [int(mov_sel)])
                                     w_conn.execute("DELETE FROM movimenti_prima_nota WHERE id = ?", [int(mov_sel)])
                                 st.session_state["flash"] = f"Registrazione N° {mov_sel} eliminata" + (
@@ -3014,6 +3063,61 @@ def pagina_prima_nota():
                         del st.session_state[chiave]
                     st.session_state["flash"] = f"Apertura dell'esercizio {es_sel} eliminata."
                     st.rerun()
+
+    with tab_f24:
+        st.markdown("### 🧾 Versamenti con modello F24")
+        st.caption("Scrivi i codici tributo e gli importi come sulla quietanza dell'F24: l'app registra ogni importo sul conto giusto. "
+                   "IVA trimestrale (6031-6034) del regime 398: si versa la metà dell'IVA delle fatture, l'altra metà è la detrazione forfettaria, "
+                   "che l'app registra da sola chiudendo tutto il debito IVA.")
+        with st.form("nuovo_f24", clear_on_submit=True):
+            f1, f2 = st.columns(2)
+            data_f24 = f1.date_input("Data del versamento", format="DD/MM/YYYY")
+            pag_f24 = f2.selectbox("Pagato con", ["BONIFICO", "PAYPAL", "CONTANTI"], format_func=lambda x: {"BONIFICO": "Banca"}.get(x, x.capitalize()))
+            vuote = pd.DataFrame({"Codice tributo": pd.Series([None] * 3, dtype="object"), "Anno o periodo": pd.Series([""] * 3, dtype="object"),
+                                  "Importo (€)": pd.Series([0.0] * 3, dtype="float")})
+            righe_f24_ed = st.data_editor(vuote, num_rows="dynamic", width="stretch", hide_index=True, key="f24_righe", column_config={
+                "Codice tributo": st.column_config.SelectboxColumn(options=[f24.etichetta(c) for c in f24.CODICI_TRIBUTO], width="large"),
+                "Anno o periodo": st.column_config.TextColumn(help="Come sull'F24, es. 2026 oppure 3° trimestre 2026"),
+                "Importo (€)": st.column_config.NumberColumn(min_value=0.0, step=0.01, format="%.2f")})
+            detr_f24 = st.checkbox("IVA trimestrale con detrazione forfettaria del regime 398", value=True,
+                                   help="Togli la spunta solo se l'IVA versata non è quella del regime 398.")
+            note_f24 = st.text_input("Note (facoltative)")
+            if st.form_submit_button("💾 Registra l'F24", type="primary"):
+                righe_ok = [(str(r["Codice tributo"]).split(" - ")[0], str(r["Anno o periodo"] or "").strip(), round(float(r["Importo (€)"] or 0), 2))
+                            for _, r in righe_f24_ed.iterrows() if r["Codice tributo"] and float(r["Importo (€)"] or 0) > 0]
+                if not righe_ok:
+                    st.error("Inserisci almeno un codice tributo con il suo importo.")
+                else:
+                    conto_pag_f24 = {"BONIFICO": "10.01.001", "PAYPAL": "10.01.003"}.get(pag_f24, "10.01.002")
+                    scrittura_f24 = f24.righe_scrittura(righe_ok, conto_pag_f24, detr_f24)
+                    totale_f24 = round(sum(r[2] for r in righe_ok), 2)
+                    try:
+                        with db_write() as w_conn:
+                            righe_j = [(get_conto_id(w_conn, cod), descr, dare, avere) for cod, descr, dare, avere in scrittura_f24]
+                            mov_f24 = post_journal(w_conn, data_f24, "F24", "Versamento F24 " + ", ".join(sorted({r[0] for r in righe_ok})),
+                                                   "ISTITUZIONALE", righe_j)
+                            vid = w_conn.execute("INSERT INTO versamenti_f24 (data, modalita_pagamento, totale, note, movimento_id) VALUES (?, ?, ?, ?, ?)",
+                                                 [str(data_f24), pag_f24, totale_f24, note_f24.strip() or None, mov_f24]).lastrowid
+                            for cod, per, imp in righe_ok:
+                                w_conn.execute("INSERT INTO righe_f24 (versamento_id, codice_tributo, periodo, importo) VALUES (?, ?, ?, ?)", [vid, cod, per or None, imp])
+                        st.session_state["flash"] = f"F24 del {data_f24.strftime('%d/%m/%Y')} di € {totale_f24:,.2f} registrato in prima nota."
+                        st.rerun()
+                    except Exception as ex_f24:
+                        st.error(f"F24 non registrato: {ex_f24}")
+
+        df_f24 = leggi_df(
+            "SELECT v.id, v.data, v.modalita_pagamento, r.codice_tributo, r.periodo, r.importo, v.note "
+            "FROM versamenti_f24 v JOIN righe_f24 r ON r.versamento_id = v.id ORDER BY v.data DESC, v.id DESC, r.id")
+        if df_f24.empty:
+            st.info("Nessun F24 registrato.")
+        else:
+            st.markdown("##### Registro degli F24")
+            st.dataframe(pd.DataFrame({
+                "Data": pd.to_datetime(df_f24["data"]).dt.strftime("%d/%m/%Y"),
+                "Codice tributo": [f24.etichetta(c) if c in f24.CODICI_TRIBUTO else c for c in df_f24["codice_tributo"]],
+                "Periodo": df_f24["periodo"].fillna(""), "Importo (€)": df_f24["importo"],
+                "Pagato con": df_f24["modalita_pagamento"].fillna(""), "Note": df_f24["note"].fillna("")}), width="stretch", hide_index=True)
+            st.caption("Per correggere o eliminare un F24 usa «Modifica o elimina una registrazione» nel giornale di prima nota.")
 
 # ---------------------------------------------------------
 # 8. PIANO DEI CONTI ASD

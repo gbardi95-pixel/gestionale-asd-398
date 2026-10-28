@@ -92,6 +92,16 @@ def situazione_quote(df_tesserati, df_parametri, df_versato):
     return pd.DataFrame(righe, columns=["anagrafica_id", "Persona", "Squadra", "Tesseramento", "Dovuto (€)", "Versato (€)", "Da versare (€)", "Note"])
 
 
+def dividi_versamento(importo, da_versare):
+    """(quota, erogazione liberale) di un versamento: fino alla quota ancora dovuta è quota, la parte in più è erogazione.
+
+    Solo l'eccedenza volontaria oltre la quota ordinaria può essere erogazione liberale (Agenzia delle Entrate, ris. 59/E del 2017).
+    """
+    importo = round(float(importo), 2)
+    quota = round(min(importo, max(float(da_versare or 0), 0.0)), 2)
+    return quota, round(importo - quota, 2)
+
+
 def costo_tesseramenti(df_tesserati, df_parametri):
     """Quanto la società deve all'ente: tessere per voce × costo, iscrizione e cauzione per ogni squadra con tesserati, affiliazione."""
     df_parametri = indice_parametri(df_parametri)

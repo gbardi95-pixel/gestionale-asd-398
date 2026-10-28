@@ -52,6 +52,7 @@ PIANO_DEI_CONTI_ASD = [
     ('40.03', 'Oneri Diversi e Straordinari', 'COSTO', 2),
     ('40.03.001', 'Sopravvenienze Passive', 'COSTO', 3),
     ('40.03.002', 'Rimborso Finanziamenti Soci', 'COSTO', 3),
+    ('40.03.003', 'Sanzioni e Interessi su Imposte', 'COSTO', 3),
 
     # 50. RICAVI
     ('50', 'RICAVI ED ENTRATE ASD', 'RICAVO', 1),
@@ -63,6 +64,7 @@ PIANO_DEI_CONTI_ASD = [
     ('50.02.001', 'Ricavi per Sponsorizzazioni e Pubblicità', 'RICAVO', 3),
     ('50.02.002', 'Contributi da Enti e Associazioni', 'RICAVO', 3),
     ('50.02.003', 'Altri Ricavi Commerciali', 'RICAVO', 3),
+    ('50.02.004', 'Detrazione Forfettaria IVA (L. 398/91)', 'RICAVO', 3),
     ('50.03', 'Proventi Diversi e Straordinari', 'RICAVO', 2),
     ('50.03.001', 'Sopravvenienze Attive', 'RICAVO', 3),
     ('50.03.002', 'Altri Ricavi e Proventi', 'RICAVO', 3),
@@ -568,6 +570,27 @@ def init_db(versione_schema=None):
     """)
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_registro_quando ON registro_attivita(quando);")
 
+    # 21. Versamenti con modello F24, riga per riga con il codice tributo
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS versamenti_f24 (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        data TEXT NOT NULL,
+        modalita_pagamento TEXT,
+        totale REAL NOT NULL,
+        note TEXT,
+        movimento_id INTEGER REFERENCES movimenti_prima_nota(id)
+    );
+    """)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS righe_f24 (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        versamento_id INTEGER NOT NULL REFERENCES versamenti_f24(id) ON DELETE CASCADE,
+        codice_tributo TEXT NOT NULL,
+        periodo TEXT,
+        importo REAL NOT NULL
+    );
+    """)
+
     # Migrazione: socio di un'altra società, qui tesserato solo con la scheda attività
     try:
         cursor.execute("ALTER TABLE tesserati_calcio ADD COLUMN socio_altra_societa INTEGER NOT NULL DEFAULT 0;")
@@ -600,6 +623,8 @@ def init_db(versione_schema=None):
         "ALTER TABLE fatture_passive ADD COLUMN movimento_pagamento_id INTEGER;",
         # Compensi: registrazione di prima nota collegata
         "ALTER TABLE compensi_sportivi ADD COLUMN movimento_id INTEGER;",
+        # Ricevuta: copia del PDF com'era al momento dell'emissione
+        "ALTER TABLE ricevute_istituzionali ADD COLUMN pdf_base64 TEXT;",
     ):
         try:
             cursor.execute(alter_sql)

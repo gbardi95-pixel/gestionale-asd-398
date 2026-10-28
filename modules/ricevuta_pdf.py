@@ -94,7 +94,8 @@ def genera(societa, ricevuta):
     storia.append(Spacer(1, 10))
 
     versante = ricevuta.get("versante") or ricevuta["praticante"]
-    versante_cf = ricevuta.get("versante_cf") or ricevuta.get("praticante_cf") or "da completare"
+    # Il codice fiscale del praticante vale anche per chi paga solo se è la stessa persona
+    versante_cf = ricevuta.get("versante_cf") or (None if ricevuta.get("versante") else ricevuta.get("praticante_cf")) or "da completare"
     erogazione = str(ricevuta["causale"]).startswith("Erogazione Liberale")
     righe = [["Ricevuto da", f"{versante}\nC.F. {versante_cf}"]]
     if not erogazione:
