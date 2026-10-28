@@ -735,7 +735,7 @@ def parse_bank_statement(file_bytes, file_name, tipo_fonte="BANCA"):
 # 1. DASHBOARD & ALERT SCADENZE
 # ---------------------------------------------------------
 def pagina_dashboard():
-    st.subheader("📊 Panoramica Generale & Monitoraggio Sanitario")
+    st.subheader("📊 Dashboard e scadenze")
 
     today = datetime.date.today().strftime("%Y-%m-%d")
     current_year = str(datetime.date.today().year)
@@ -779,17 +779,6 @@ def pagina_dashboard():
         "SELECT COALESCE(SUM(importo), 0.0) as tot FROM ricevute_istituzionali WHERE strftime('%Y', data_emissione) = ? AND " + SQL_NON_EROGAZIONE,
         [current_year]
     )["tot"].iloc[0]
-
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Anagrafiche Attive", int(num_tesserati), f"{int(num_giocatori)} giocano", delta_color="off")
-    ini_dash, fin_dash, etich_dash = esercizio_corrente()
-    df_tess_dash, df_vers_dash = dati_quote(ini_dash, fin_dash)
-    da_incassare_dash = quote.situazione_quote(df_tess_dash, parametri_esercizio(etich_dash), df_vers_dash)["Da versare (€)"].clip(lower=0).sum()
-    k2.metric(f"Quote Incassate ({current_year})", f"€ {tot_quote:,.2f}",
-              f"€ {da_incassare_dash:,.2f} da incassare (stagione {etich_dash})" if da_incassare_dash else None, delta_color="off")
-    k3.metric(f"Ricavi Sponsor 398 ({current_year})", f"€ {tot_sponsor:,.2f}")
-    k4.metric("IVA 398 ancora da versare", f"€ {iva_50_versare:,.2f}",
-              f"su € {debito_iva:,.2f} di IVA delle fatture non ancora chiusa con F24" if debito_iva > 0 else None, delta_color="off")
 
     # Scadenze fiscali dai debiti ancora aperti in prima nota (IVA, ritenute, contributi) e adempimenti annuali
     oggi_sc = datetime.date.today()
@@ -842,17 +831,37 @@ def pagina_dashboard():
         st.warning("⚠️ Proventi commerciali oltre l'80% della soglia del regime 398: tieni d'occhio le prossime sponsorizzazioni.")
 
     st.divider()
-    st.markdown("### 🚑 Alert Certificati Medici (solo tesserati che giocano)")
+    st.markdown("### 📊 Numeri principali")
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Anagrafiche Attive", int(num_tesserati), f"{int(num_giocatori)} giocano", delta_color="off")
+    ini_dash, fin_dash, etich_dash = esercizio_corrente()
+    df_tess_dash, df_vers_dash = dati_quote(ini_dash, fin_dash)
+    da_incassare_dash = quote.situazione_quote(df_tess_dash, parametri_esercizio(etich_dash), df_vers_dash)["Da versare (€)"].clip(lower=0).sum()
+    k2.metric(f"Quote Incassate ({current_year})", f"€ {tot_quote:,.2f}",
+              f"€ {da_incassare_dash:,.2f} da incassare (stagione {etich_dash})" if da_incassare_dash else None, delta_color="off")
+    k3.metric(f"Ricavi Sponsor 398 ({current_year})", f"€ {tot_sponsor:,.2f}")
+    k4.metric("IVA 398 ancora da versare", f"€ {iva_50_versare:,.2f}",
+              f"su € {debito_iva:,.2f} di IVA delle fatture non ancora chiusa con F24" if debito_iva > 0 else None, delta_color="off")
+
+    st.divider()
+    st.markdown("### 🚑 Certificati medici (solo tesserati che giocano)")
     st.caption("Chi non svolge attività sportiva (es. dirigenti che non giocano) non ha l'obbligo del certificato e non compare qui.")
     if not df_cert_alert.empty:
-        for _, r in df_cert_alert.iterrows():
-            if pd.isna(r["Scadenza"]) or not r["Scadenza"]:
-                st.error(f"⛔ **{r['Tesserato']}** - CERTIFICATO MANCANTE (Non schierabile in gara)")
-            elif r["Scadenza"] < today:
-                st.error(f"⛔ **{r['Tesserato']}** - CERTIFICATO SCADUTO IL {r['Scadenza']} (Non schierabile in gara)")
-            else:
-                st.warning(f"⚠️ **{r['Tesserato']}** - Certificato in scadenza il {r['Scadenza']}")
-        st.dataframe(df_cert_alert.drop(columns=["telefono", "email"]), width="stretch", hide_index=True)
+        # Un riepilogo con i conteggi al posto di un avviso per persona; l'elenco si apre a richiesta
+        senza_data = df_cert_alert["Scadenza"].isna() | (df_cert_alert["Scadenza"].fillna("") == "")
+        n_mancanti = int(senza_data.sum())
+        n_scaduti = int((~senza_data & (df_cert_alert["Scadenza"].fillna("") < today)).sum())
+        n_in_scadenza = len(df_cert_alert) - n_mancanti - n_scaduti
+        if n_mancanti or n_scaduti:
+            st.error(f"⛔ Non schierabili in gara: **{n_mancanti}** senza certificato, **{n_scaduti}** con certificato scaduto.")
+        if n_in_scadenza:
+            st.warning(f"⏰ **{n_in_scadenza}** certificati scadono nei prossimi 30 giorni.")
+        with st.expander(f"📋 Elenco dei tesserati ({len(df_cert_alert)})"):
+            elenco_cert = df_cert_alert.drop(columns=["telefono", "email"]).copy()
+            elenco_cert.insert(1, "Situazione", [
+                "Mancante" if m else ("Scaduto" if str(d) < today else "In scadenza")
+                for m, d in zip(senza_data, df_cert_alert["Scadenza"].fillna(""))])
+            st.dataframe(elenco_cert, width="stretch", hide_index=True)
         with st.expander(f"📣 Avvisi da inviare ({len(df_cert_alert)}): messaggio pronto per WhatsApp o email"):
             modello_cert = leggi_impostazione("testo_avviso_certificato", solleciti.TESTO_CERTIFICATO)
             with st.form("form_testo_certificato"):
@@ -1064,7 +1073,7 @@ def pagina_soci():
                         etichette = {f"{r['denominazione']} (CF: {r['codice_fiscale'] or 'N.D.'})": int(r["tid"]) for r in solo_gestionale}
                         scelti = st.multiselect(
                             f"Tesserati attivi del gestionale NON presenti nel file ({len(solo_gestionale)}): seleziona chi segnare come INATTIVO (mancato rinnovo)",
-                            list(etichette.keys())
+                            list(etichette.keys()), placeholder="Nessuno"
                         )
                         inattivare_ids = [etichette[s] for s in scelti]
 
@@ -3791,7 +3800,7 @@ def pagina_squadra():
                 scad = gioc_cat.loc[gioc_cat["id"] == aid, "scad"].iloc[0]
                 valido = pd.notna(scad) and str(scad) >= str(data_cv)
                 return nomi_sq[aid] + ("" if valido else " ⛔ certificato non valido")
-            conv_cv = st.multiselect("Convocati", list(nomi_sq), format_func=etichetta_conv)
+            conv_cv = st.multiselect("Convocati", list(nomi_sq), format_func=etichetta_conv, placeholder="Scegli i giocatori")
             note_cv = st.text_area("Note per i convocati (facoltative)", height=70, placeholder="es. portare la tuta di rappresentanza")
             if st.form_submit_button("💾 Salva la convocazione", type="primary"):
                 if not conv_cv:
@@ -3854,9 +3863,9 @@ def pagina_squadra():
         with st.form(f"presenze_{cat_sq}_{data_all}"):
             st.caption("Tutti risultano presenti tranne quelli che indichi qui sotto.")
             assenti = st.multiselect("Assenti", list(nomi_sq), format_func=lambda a: nomi_sq[a],
-                                     default=[a for a, s in stati_prec.items() if s == "ASSENTE" and a in nomi_sq])
+                                     default=[a for a, s in stati_prec.items() if s == "ASSENTE" and a in nomi_sq], placeholder="Nessuno")
             giustificati = st.multiselect("Assenti giustificati", list(nomi_sq), format_func=lambda a: nomi_sq[a],
-                                          default=[a for a, s in stati_prec.items() if s == "GIUSTIFICATO" and a in nomi_sq])
+                                          default=[a for a, s in stati_prec.items() if s == "GIUSTIFICATO" and a in nomi_sq], placeholder="Nessuno")
             if st.form_submit_button("💾 Salva le presenze", type="primary"):
                 doppi = set(assenti) & set(giustificati)
                 if doppi:
@@ -4070,7 +4079,9 @@ if "flash" in st.session_state:
 if "flash_error" in st.session_state:
     st.error(st.session_state.pop("flash_error"))
 
-st.title(f"⚽ {APP_TITLE}")
+# Nome dell'app in piccolo in cima a ogni pagina: lo spazio resta al contenuto (il titolo grande solo nella pagina di accesso)
+st.markdown('<style>[data-testid="stMainBlockContainer"] {padding-top: 2.5rem;}</style>', unsafe_allow_html=True)
+st.caption(f"⚽ {APP_TITLE}")
 if not utenti.puo_scrivere(UTENTE["ruolo"]):
     st.info("👁️ Profilo di sola consultazione: puoi vedere i dati ma non salvare modifiche.")
 
@@ -4107,7 +4118,7 @@ for sezione, voci in MENU.items():
         if utenti.pagina_permessa(UTENTE["ruolo"], url):
             pagine_menu[url] = st.Page(funzione, title=titolo, icon=icona, url_path=url, default=url == pagina_iniziale)
             sezioni_menu.setdefault(sezione, []).append(pagine_menu[url])
-pagina = st.navigation(sezioni_menu)
+pagina = st.navigation(sezioni_menu, expanded=True)
 
 if "backup" in pagine_menu:
     giorni_bk = giorni_da_ultimo_backup()

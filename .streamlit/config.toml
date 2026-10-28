@@ -1,0 +1,8 @@
+# Aspetto dell'app: colore principale sobrio (pulsanti di conferma, schede attive) al posto del rosso predefinito
+[theme]
+base = "light"
+primaryColor = "#1F5A96"
+
+# Niente pulsante «Deploy» e menu da sviluppatore in alto a destra
+[client]
+toolbarMode = "viewer"
