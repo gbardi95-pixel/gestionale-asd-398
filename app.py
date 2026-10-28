@@ -3074,7 +3074,18 @@ def pagina_prima_nota():
             r1.metric(f"Ricavi {anno_rend}", f"€ {tot_ricavi:,.2f}")
             r2.metric(f"Costi {anno_rend}", f"€ {tot_costi:,.2f}")
             r3.metric("Avanzo / Disavanzo", f"€ {tot_ricavi - tot_costi:,.2f}")
-            st.dataframe(df_rend, width="stretch")
+            # Ricavi e costi in due tabelle, con l'importo netto di ogni conto (codici e totali dare/avere solo nel PDF e nella prima nota)
+            t_ric, t_cos = st.columns(2)
+            for colonna, tipo_r, titolo_r, segno_r in ((t_ric, "RICAVO", "Ricavi", -1), (t_cos, "COSTO", "Costi", 1)):
+                parte = df_rend[df_rend["tipo"] == tipo_r]
+                colonna.markdown(f"**{titolo_r}**")
+                if parte.empty:
+                    colonna.caption("Nessun importo nell'esercizio.")
+                    continue
+                colonna.dataframe(pd.DataFrame({"Conto": parte["nome"], "Codice": parte["codice"],
+                                                "Importo (€)": (segno_r * (parte["Tot_Dare"] - parte["Tot_Avere"])).round(2)}),
+                                  width="stretch", hide_index=True,
+                                  column_config={"Importo (€)": st.column_config.NumberColumn(format="%.2f")})
 
             st.markdown("**📄 Rendiconto per l'assemblea dei soci**")
             st.caption("PDF con rendiconto economico (a confronto con l'esercizio precedente e con il preventivo, se impostato), "
