@@ -11,7 +11,7 @@ import warnings
 import pandas as pd
 import streamlit as st
 from contextlib import contextmanager
-from modules import backup, distinte, esercizio, estratti, f24, lavoro_sportivo, libro_soci, preventivo, quote, rendiconto_pdf, ricevuta_pdf, solleciti, squadra, tesseramento, utenti
+from modules import backup, distinte, esercizio, estratti, f24, lavoro_sportivo, libro_soci, preventivo, quote, rendiconto_pdf, ricevuta_pdf, scadenze, solleciti, squadra, tesseramento, utenti
 from modules import cap as cap_comuni
 from modules.db import PIANO_DEI_CONTI_ASD, _turso_credentials, connessione_replica, get_connection, init_db, usa_turso, versione_schema_db
 
@@ -758,6 +758,55 @@ def pagina_dashboard():
     k3.metric(f"Ricavi Sponsor 398 ({current_year})", f"€ {tot_sponsor:,.2f}")
     k4.metric("IVA 398 ancora da versare", f"€ {iva_50_versare:,.2f}",
               f"su € {debito_iva:,.2f} di IVA delle fatture non ancora chiusa con F24" if debito_iva > 0 else None, delta_color="off")
+
+    # Scadenze fiscali dai debiti ancora aperti in prima nota (IVA, ritenute, contributi) e adempimenti annuali
+    oggi_sc = datetime.date.today()
+    saldi_sc = saldi_conti_prima_del(oggi_sc + datetime.timedelta(days=1))
+    df_accrediti = leggi_df(
+        "SELECT p.codice, m.data_registrazione AS data, r.avere FROM righe_prima_nota r "
+        "JOIN movimenti_prima_nota m ON m.id = r.movimento_id JOIN piano_dei_conti p ON p.id = r.sottoconto_id "
+        "WHERE p.codice IN (?, ?, ?) AND r.avere > 0", [f24.CONTO_IVA, f24.CONTO_RITENUTE, "20.02.004"])
+
+    def accrediti(codice):
+        return [(datetime.date.fromisoformat(str(d)[:10]), float(a)) for c, d, a in df_accrediti.itertuples(index=False) if c == codice]
+
+    def attivita_anno(anno):
+        r = leggi_df(
+            "SELECT (SELECT COUNT(*) FROM compensi_sportivi WHERE strftime('%Y', data_erogazione) = ?) AS compensi, "
+            "(SELECT COALESCE(SUM(ritenuta_irpef), 0) FROM compensi_sportivi WHERE strftime('%Y', data_erogazione) = ?) AS ritenute, "
+            "(SELECT COALESCE(SUM(r.avere - r.dare), 0) FROM righe_prima_nota r JOIN movimenti_prima_nota m ON m.id = r.movimento_id "
+            " JOIN piano_dei_conti p ON p.id = r.sottoconto_id WHERE p.codice LIKE '50.02.%' AND strftime('%Y', m.data_registrazione) = ?) AS commerciali",
+            [str(anno)] * 3).iloc[0]
+        return int(r["compensi"]), float(r["ritenute"]), round(float(r["commerciali"]), 2)
+
+    att_prec, att_corr = attivita_anno(oggi_sc.year - 1), attivita_anno(oggi_sc.year)
+    elenco_sc = (scadenze.scadenze_iva_398(accrediti(f24.CONTO_IVA), -saldi_sc.get(f24.CONTO_IVA, 0.0), f24.PERCENTUALE_DETRAZIONE_398)
+                 + scadenze.scadenze_mensili(accrediti(f24.CONTO_RITENUTE), -saldi_sc.get(f24.CONTO_RITENUTE, 0.0), "Ritenute IRPEF sui compensi")
+                 + scadenze.scadenze_mensili(accrediti("20.02.004"), -saldi_sc.get("20.02.004", 0.0), "Contributi INPS sui compensi")
+                 + scadenze.scadenze_annuali(oggi_sc.year, *att_prec) + scadenze.scadenze_annuali(oggi_sc.year + 1, *att_corr))
+    vicine_sc = scadenze.da_mostrare(elenco_sc, oggi_sc)
+    st.markdown("### 🗓️ Scadenze fiscali")
+    if not vicine_sc:
+        st.success(f"Nessuna scadenza fiscale nei prossimi {scadenze.GIORNI_PREAVVISO} giorni.")
+    for s in vicine_sc:
+        testo_sc = f"**{s['scadenza']:%d/%m/%Y}** – {s['cosa']}" + (f": **€ {s['importo']:,.2f}**" if s["importo"] is not None else "")
+        if s["scadenza"] < oggi_sc:
+            st.error(f"⛔ Scaduta, ancora da versare: {testo_sc}")
+        elif (s["scadenza"] - oggi_sc).days <= 15:
+            st.warning(f"⏰ {testo_sc}")
+        else:
+            st.info(f"🗓️ {testo_sc}")
+    st.caption("Calcolate da IVA, ritenute e contributi registrati in prima nota e non ancora chiusi con un F24: quando registri l'F24 la scadenza sparisce. "
+               "Date e codici da confermare con il commercialista e il consulente del lavoro.")
+
+    # Soglia del regime 398/91 sui proventi commerciali dell'anno
+    quota_soglia = att_corr[2] / scadenze.SOGLIA_398
+    st.progress(min(max(quota_soglia, 0.0), 1.0),
+                text=f"Regime 398: proventi commerciali {oggi_sc.year} € {att_corr[2]:,.2f} su € {scadenze.SOGLIA_398:,.0f} ({quota_soglia:.1%})")
+    if quota_soglia >= 1:
+        st.error("⛔ Soglia del regime 398 superata: dal mese successivo si applica il regime ordinario. Contatta subito il commercialista.")
+    elif quota_soglia >= 0.8:
+        st.warning("⚠️ Proventi commerciali oltre l'80% della soglia del regime 398: tieni d'occhio le prossime sponsorizzazioni.")
 
     st.divider()
     st.markdown("### 🚑 Alert Certificati Medici (solo tesserati che giocano)")
