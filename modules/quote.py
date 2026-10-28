@@ -24,8 +24,8 @@ TUTTE = ""  # categoria vuota = valore valido per tutte le squadre
 def voci_persona(tipo_tessera, gioca, ha_scheda, socio_altrove):
     """Voci che si applicano a una persona.
 
-    Chi è socio di un'altra società qui ha solo la scheda attività. Chi ha anche una scheda attività
-    oltre alla tessera (es. dirigente che gioca) paga entrambe.
+    Chi è socio di un'altra società qui ha solo la scheda attività. Chi ha anche una scheda attività oltre alla
+    tessera (es. dirigente che gioca) costa alla società entrambe; la quota chiesta alla persona è in voci_quota().
     """
     if socio_altrove:
         return ["SCHEDA_ATTIVITA"]
@@ -41,6 +41,13 @@ def voci_persona(tipo_tessera, gioca, ha_scheda, socio_altrove):
     if ha_scheda:
         voci.append("SCHEDA_ATTIVITA")
     return voci
+
+
+def voci_quota(tipo_tessera, gioca, ha_scheda, socio_altrove):
+    """Voci su cui si chiede la quota alla persona: il socio paga solo la quota della sua tessera, anche se ha pure una
+    scheda attività (che resta un costo della società); chi è socio di un'altra società paga la scheda attività."""
+    voci = voci_persona(tipo_tessera, gioca, ha_scheda, socio_altrove)
+    return voci if socio_altrove else [v for v in voci if v != "SCHEDA_ATTIVITA"]
 
 
 def indice_parametri(df_parametri):
@@ -74,7 +81,7 @@ def situazione_quote(df_tesserati, df_parametri, df_versato):
     df_parametri = indice_parametri(df_parametri)
     righe = []
     for r in df_tesserati.itertuples():
-        voci = voci_persona(r.tipo_tessera, bool(r.gioca), bool(str(r.numero_scheda_attivita or "").strip()), bool(r.socio_altra_societa))
+        voci = voci_quota(r.tipo_tessera, bool(r.gioca), bool(str(r.numero_scheda_attivita or "").strip()), bool(r.socio_altra_societa))
         da_parametri = round(sum(valore(df_parametri, v, r.categoria, "quota_richiesta") for v in voci), 2)
         personalizzata = float(r.quota_stagionale or 0)
         dovuto = personalizzata if personalizzata > 0 else da_parametri
