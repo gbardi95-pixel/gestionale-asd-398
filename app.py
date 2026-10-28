@@ -11,7 +11,7 @@ import warnings
 import pandas as pd
 import streamlit as st
 from contextlib import contextmanager
-from modules import backup, distinte, esercizio, f24, lavoro_sportivo, libro_soci, preventivo, quote, rendiconto_pdf, ricevuta_pdf, solleciti, squadra, tesseramento, utenti
+from modules import backup, distinte, esercizio, estratti, f24, lavoro_sportivo, libro_soci, preventivo, quote, rendiconto_pdf, ricevuta_pdf, solleciti, squadra, tesseramento, utenti
 from modules import cap as cap_comuni
 from modules.db import PIANO_DEI_CONTI_ASD, _turso_credentials, connessione_replica, get_connection, init_db, usa_turso, versione_schema_db
 
@@ -736,9 +736,12 @@ def pagina_dashboard():
         "SELECT COALESCE(SUM(imponibile), 0.0) as tot FROM fatture_sponsor_398 WHERE strftime('%Y', data_fattura) = ?", [current_year]
     )["tot"].iloc[0]
 
-    iva_50_versare = leggi_df(
-        "SELECT COALESCE(SUM(iva_da_versare_50), 0.0) as tot FROM fatture_sponsor_398 WHERE strftime('%Y', data_fattura) = ?", [current_year]
-    )["tot"].iloc[0]
+    # IVA ancora da versare: la parte non coperta dalla detrazione forfettaria del debito IVA rimasto aperto (si chiude con l'F24)
+    debito_iva = -leggi_df(
+        "SELECT COALESCE(SUM(r.dare - r.avere), 0.0) as saldo FROM righe_prima_nota r JOIN piano_dei_conti p ON p.id = r.sottoconto_id "
+        "WHERE p.codice = ?", [f24.CONTO_IVA]
+    )["saldo"].iloc[0]
+    iva_50_versare = round(max(debito_iva, 0.0) * (100 - f24.PERCENTUALE_DETRAZIONE_398) / 100, 2)
 
     tot_quote = leggi_df(
         "SELECT COALESCE(SUM(importo), 0.0) as tot FROM ricevute_istituzionali WHERE strftime('%Y', data_emissione) = ? AND " + SQL_NON_EROGAZIONE,
@@ -753,7 +756,8 @@ def pagina_dashboard():
     k2.metric(f"Quote Incassate ({current_year})", f"€ {tot_quote:,.2f}",
               f"€ {da_incassare_dash:,.2f} da incassare (stagione {etich_dash})" if da_incassare_dash else None, delta_color="off")
     k3.metric(f"Ricavi Sponsor 398 ({current_year})", f"€ {tot_sponsor:,.2f}")
-    k4.metric(f"IVA 398 da Versare 50% ({current_year})", f"€ {iva_50_versare:,.2f}")
+    k4.metric("IVA 398 ancora da versare", f"€ {iva_50_versare:,.2f}",
+              f"su € {debito_iva:,.2f} di IVA delle fatture non ancora chiusa con F24" if debito_iva > 0 else None, delta_color="off")
 
     st.divider()
     st.markdown("### 🚑 Alert Certificati Medici (solo tesserati che giocano)")
@@ -2651,8 +2655,9 @@ def pagina_estratti_conto():
 def pagina_prima_nota():
     st.subheader("📖 Giornale di Prima Nota e Rendiconto Economico Finanziario ASD")
 
-    tab_giornale, tab_rendiconto, tab_apertura, tab_f24 = st.tabs(["Giornale di Prima Nota (Partita Doppia)", "Rendiconto Economico Finanziario",
-                                                                    "📂 Apertura esercizio", "🧾 Versamenti F24"])
+    tab_giornale, tab_rendiconto, tab_apertura, tab_f24, tab_estratti = st.tabs([
+        "Giornale di Prima Nota (Partita Doppia)", "Rendiconto Economico Finanziario", "📂 Apertura esercizio", "🧾 Versamenti F24",
+        "🏦 Controllo estratto conto"])
 
     with tab_giornale:
         with st.expander("➕ Nuova Registrazione Manuale (Uscite / Spese / Incassi Generici)"):
@@ -3118,6 +3123,99 @@ def pagina_prima_nota():
                 "Periodo": df_f24["periodo"].fillna(""), "Importo (€)": df_f24["importo"],
                 "Pagato con": df_f24["modalita_pagamento"].fillna(""), "Note": df_f24["note"].fillna("")}), width="stretch", hide_index=True)
             st.caption("Per correggere o eliminare un F24 usa «Modifica o elimina una registrazione» nel giornale di prima nota.")
+
+    with tab_estratti:
+        st.markdown("### 🏦 Controllo dell'estratto conto")
+        st.caption("Carica l'estratto scaricato dalla banca (Excel «Lista movimenti») o da PayPal (rapporto delle attività in CSV): "
+                   "l'app lo confronta con la prima nota e mostra cosa manca da una parte o dall'altra. Il file non viene salvato.")
+        file_ec = st.file_uploader("Estratto conto", type=["xlsx", "xls", "csv"], key="estratto_conto")
+        mov_ec = None
+        if file_ec is not None:
+            try:
+                mov_ec, info_ec = estratti.leggi(file_ec.name, file_ec.getvalue())
+            except Exception as ex_ec:
+                st.error(f"Estratto non letto: {ex_ec}")
+        if mov_ec is not None:
+            conti_ec = {"10.01.001": "Banca", "10.01.003": "PayPal", "10.01.002": "Cassa"}
+            conto_ec = st.selectbox("Conto della prima nota da controllare", list(conti_ec), index=1 if info_ec["tipo"] == "PAYPAL" else 0,
+                                    format_func=lambda c: f"{c} - {conti_ec[c]}")
+            dal_ec, al_ec = info_ec["dal"], info_ec["al"]
+            reg_ec = leggi_df(
+                """
+                SELECT r.id AS riga_id, m.data_registrazione AS Data, m.causale AS Causale, ROUND(r.dare - r.avere, 2) AS Importo
+                FROM righe_prima_nota r
+                JOIN movimenti_prima_nota m ON m.id = r.movimento_id
+                JOIN piano_dei_conti p ON p.id = r.sottoconto_id
+                WHERE p.codice = ? AND m.data_registrazione BETWEEN ? AND ?
+                  AND m.id NOT IN (SELECT movimento_id FROM aperture_esercizio WHERE movimento_id IS NOT NULL)
+                ORDER BY m.data_registrazione, r.id
+                """, [conto_ec, str(dal_ec), str(al_ec)])
+            abbinati_ec, non_trovate_ec = estratti.abbina(mov_ec, reg_ec)
+            mancanti_ec = abbinati_ec[abbinati_ec["riga_id"].isna()].reset_index(drop=True)
+            saldo_cont_ec = round(saldi_conti_prima_del(al_ec + datetime.timedelta(days=1)).get(conto_ec, 0.0), 2)
+            saldo_file_ec = info_ec.get("saldo_finale")
+
+            s1, s2, s3 = st.columns(3)
+            s1.metric(f"Saldo dell'estratto al {al_ec:%d/%m/%Y}", f"€ {saldo_file_ec:,.2f}" if saldo_file_ec is not None else "da completare")
+            s2.metric("Saldo in contabilità", f"€ {saldo_cont_ec:,.2f}")
+            if saldo_file_ec is not None:
+                s3.metric("Differenza", f"€ {saldo_cont_ec - saldo_file_ec:,.2f}")
+            st.caption(f"Periodo dal {dal_ec:%d/%m/%Y} al {al_ec:%d/%m/%Y}: {len(abbinati_ec)} movimenti nell'estratto, "
+                       f"{len(abbinati_ec) - len(mancanti_ec)} trovati in prima nota (stesso importo, entro {estratti.GIORNI_TOLLERANZA} giorni). "
+                       "I pagamenti PayPal restituiti si annullano con il loro rimborso; la commissione trattenuta resta.")
+            if mancanti_ec.empty and non_trovate_ec.empty and saldo_file_ec is not None and abs(saldo_cont_ec - saldo_file_ec) < 0.005:
+                st.success("L'estratto e la prima nota coincidono.")
+
+            if not mancanti_ec.empty:
+                st.markdown(f"##### Movimenti dell'estratto non registrati ({len(mancanti_ec)})")
+                conti_reg_ec = leggi_df("SELECT codice || ' - ' || nome AS conto FROM piano_dei_conti "
+                                        "WHERE livello = 3 AND tipo IN ('COSTO', 'RICAVO') ORDER BY codice")["conto"].tolist()
+                conto_comm_ec = next((c for c in conti_reg_ec if c.startswith("40.02.003")), None)
+                commissioni_ec = [estratti.e_commissione(d) for d in mancanti_ec["Descrizione"]]
+                ed_ec = st.data_editor(pd.DataFrame({
+                    "Registra": commissioni_ec, "Data": mancanti_ec["Data"], "Descrizione": mancanti_ec["Descrizione"],
+                    "Importo (€)": mancanti_ec["Importo"], "Conto": [conto_comm_ec if c else None for c in commissioni_ec]}),
+                    hide_index=True, width="stretch", disabled=["Data", "Descrizione", "Importo (€)"], key=f"ec_mancanti_{conto_ec}",
+                    column_config={"Data": st.column_config.DateColumn(format="DD/MM/YYYY"),
+                                   "Importo (€)": st.column_config.NumberColumn(format="%.2f"),
+                                   "Conto": st.column_config.SelectboxColumn(options=conti_reg_ec, width="large")})
+                st.caption("Le commissioni sono già pronte. Per gli altri movimenti scegli il conto e spunta «Registra». "
+                           "Quote e sponsor registrali invece da Ricevute e Fatture sponsor, così si emette anche il documento.")
+                if st.button("💾 Registra le righe spuntate", type="primary", key="ec_registra"):
+                    scelte_ec = ed_ec[ed_ec["Registra"]]
+                    if scelte_ec.empty:
+                        st.error("Spunta almeno una riga da registrare.")
+                    elif scelte_ec["Conto"].isna().any():
+                        st.error("Scegli il conto per ogni riga spuntata.")
+                    else:
+                        try:
+                            with db_write() as w_conn:
+                                id_cassa_ec = get_conto_id(w_conn, conto_ec)
+                                for _, r in scelte_ec.iterrows():
+                                    imp_ec, cod_ec = round(float(r["Importo (€)"]), 2), str(r["Conto"]).split(" - ")[0]
+                                    id_contro_ec, descr_ec = get_conto_id(w_conn, cod_ec), str(r["Descrizione"])[:150]
+                                    righe_ec = ([(id_cassa_ec, descr_ec, imp_ec, 0.0), (id_contro_ec, descr_ec, 0.0, imp_ec)] if imp_ec > 0 else
+                                                [(id_contro_ec, descr_ec, -imp_ec, 0.0), (id_cassa_ec, descr_ec, 0.0, -imp_ec)])
+                                    post_journal(w_conn, r["Data"], "Estratto conto", descr_ec,
+                                                 "COMMERCIALE" if cod_ec.startswith("50.02") else "ISTITUZIONALE", righe_ec)
+                            st.session_state["flash"] = f"{len(scelte_ec)} movimenti dell'estratto registrati in prima nota."
+                            st.rerun()
+                        except Exception as ex_reg_ec:
+                            st.error(f"Movimenti non registrati: {ex_reg_ec}")
+
+            if not non_trovate_ec.empty:
+                st.markdown(f"##### Registrazioni della prima nota che non compaiono nell'estratto ({len(non_trovate_ec)})")
+                st.dataframe(pd.DataFrame({"Data": pd.to_datetime(non_trovate_ec["Data"]).dt.strftime("%d/%m/%Y"),
+                                           "Causale": non_trovate_ec["Causale"], "Importo (€)": non_trovate_ec["Importo"]}),
+                             width="stretch", hide_index=True)
+                st.caption("Controlla data, importo e conto: possono essere registrazioni sbagliate, doppie o sul conto sbagliato. "
+                           "Si correggono da «Modifica o elimina una registrazione» nel giornale.")
+
+            with st.expander("Tutti i movimenti dell'estratto"):
+                st.dataframe(pd.DataFrame({"Data": pd.to_datetime(abbinati_ec["Data"]).dt.strftime("%d/%m/%Y"),
+                                           "Descrizione": abbinati_ec["Descrizione"], "Importo (€)": abbinati_ec["Importo"],
+                                           "In prima nota": ["✅" if pd.notna(x) else "❌" for x in abbinati_ec["riga_id"]]}),
+                             width="stretch", hide_index=True)
 
 # ---------------------------------------------------------
 # 8. PIANO DEI CONTI ASD
