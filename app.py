@@ -11,7 +11,7 @@ import warnings
 import pandas as pd
 import streamlit as st
 from contextlib import contextmanager
-from modules import backup, distinte, esercizio, estratti, f24, lavoro_sportivo, libro_soci, preventivo, quote, rendiconto_pdf, ricevuta_pdf, scadenze, solleciti, squadra, tesseramento, utenti
+from modules import backup, distinte, esercizio, estratti, f24, fattura_xml, lavoro_sportivo, libro_soci, preventivo, quote, rendiconto_pdf, ricevuta_pdf, scadenze, solleciti, squadra, tesseramento, utenti
 from modules import cap as cap_comuni
 from modules.db import ERRORE_ESERCIZIO_CHIUSO, PIANO_DEI_CONTI_ASD, _turso_credentials, connessione_replica, get_connection, init_db, usa_turso, versione_schema_db
 
@@ -20,7 +20,7 @@ from modules.db import ERRORE_ESERCIZIO_CHIUSO, PIANO_DEI_CONTI_ASD, _turso_cred
 # ---------------------------------------------------------
 # Incrementare a ogni modifica dello schema del DB: forza init_db() (e le migrazioni)
 # anche quando Streamlit Cloud aggiorna il codice senza riavviare il server.
-VERSIONE_SCHEMA_DB = 15
+VERSIONE_SCHEMA_DB = 16
 
 @st.cache_resource(show_spinner="Avvio dell'app…")
 def _setup_database(versione_schema):
@@ -2193,6 +2193,7 @@ def pagina_sponsor():
                     except Exception as ex_sp:
                         st.error(f"Errore durante il salvataggio dello sponsor: {ex_sp}")
 
+    importa_fatture_elettroniche("sponsor")
     df_sponsor = leggi_df("SELECT id, denominazione FROM anagrafiche WHERE tipo='SPONSOR' ORDER BY denominazione")
 
     if not df_sponsor.empty:
@@ -2218,34 +2219,18 @@ def pagina_sponsor():
                     try:
                         iva_totale = round(imponibile * (aliquota / 100), 2)
                         totale_fattura = round(imponibile + iva_totale, 2)
-                        iva_da_versare_50 = round(iva_totale * 0.50, 2)
-                        # Legge 398/91: reddito imponibile forfettario = 3% dei proventi; IRES 24% su quel reddito (IRAP esclusa)
-                        stima_ires_3 = round(imponibile * 0.03 * 0.24, 2)
 
                         conn = get_ro_conn()
                         try:
                             errore_num = controlla_numero_documento(conn, "fatture_sponsor_398", "numero_fattura", num_fat, data_fat.year)
                             if errore_num:
                                 raise ValueError(errore_num)
-                            acc_cred = get_conto_id(conn, "10.02.002")
-                            acc_ric = get_conto_id(conn, "50.02.001")
-                            acc_iva = get_conto_id(conn, "20.02.001")
                         finally:
                             conn.close()
 
                         with db_write() as w_conn:
-                            w_conn.execute(
-                                "INSERT INTO fatture_sponsor_398 (numero_fattura, data_fattura, sponsor_id, oggetto_contratto, imponibile, aliquota_iva, iva_totale, totale_fattura, iva_da_versare_50, stima_ires_3) "
-                                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                                [str(num_fat).strip(), str(data_fat), int(spon_dict[spon_sel]), str(oggetto).strip(), float(imponibile), float(aliquota), float(iva_totale), float(totale_fattura), float(iva_da_versare_50), float(stima_ires_3)]
-                            )
-
-                            righe_journal = [
-                                (acc_cred, f"Credito v/Sponsor {spon_sel}", float(totale_fattura), 0.0),
-                                (acc_ric, "Ricavo Sponsor 398", 0.0, float(imponibile)),
-                                (acc_iva, "IVA 22% Commerciale a Debito", 0.0, float(iva_totale))
-                            ]
-                            post_journal(w_conn, data_fat, num_fat, f"Fattura Sponsor {spon_sel}", "COMMERCIALE_398", righe_journal)
+                            registra_fattura_sponsor(w_conn, num_fat, data_fat, spon_dict[spon_sel], spon_sel, oggetto, float(imponibile),
+                                                     aliquota, iva_totale, totale_fattura)
 
                         st.session_state["flash"] = f"Fattura Sponsor {num_fat} registrata con successo!"
                         st.rerun()
@@ -3490,11 +3475,176 @@ def pagina_preventivo():
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 
+CONTI_PAGAMENTO_SPESE = {"BONIFICO": "10.01.001", "POS / CARTA": "10.01.001", "PAYPAL": "10.01.003", "CONTANTI": "10.01.002"}
+
+def _righe_segno(conto_dare, conto_avere, descr_dare, descr_avere, importo):
+    """Scrittura a due righe; con importo negativo (nota di credito) dare e avere si scambiano."""
+    importo = round(float(importo), 2)
+    if importo < 0:
+        return [(conto_avere, descr_avere, -importo, 0.0), (conto_dare, descr_dare, 0.0, -importo)]
+    return [(conto_dare, descr_dare, importo, 0.0), (conto_avere, descr_avere, 0.0, importo)]
+
+def registra_spesa(w_conn, fornitore_id, nome_fornitore, numero, data_doc, descrizione, categoria, totale, iva, modo_pagamento,
+                   xml_base64=None, data_scadenza=None):
+    """Spesa in prima nota per il totale lordo (l'IVA sugli acquisti è un costo) e nel registro delle spese; l'IVA resta come dato informativo.
+    modo_pagamento: chiave di CONTI_PAGAMENTO_SPESE, oppure None se è da pagare (debito verso il fornitore)."""
+    conto_avere = CONTI_PAGAMENTO_SPESE[modo_pagamento] if modo_pagamento else "20.01.001"
+    righe = _righe_segno(get_conto_id(w_conn, categoria), get_conto_id(w_conn, conto_avere), descrizione,
+                         "Pagamento" if modo_pagamento else "Debito verso fornitore", totale)
+    mov = post_journal(w_conn, data_doc, numero or "Spesa", f"{descrizione} - {nome_fornitore}", "ISTITUZIONALE", righe)
+    w_conn.execute(
+        "INSERT INTO fatture_passive (fornitore_id, numero_doc, data_doc, causale_spesa, imponibile, iva, totale, categoria_spesa, "
+        "modalita_pagamento, data_pagamento, movimento_id, movimento_pagamento_id, xml_base64, data_scadenza) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [int(fornitore_id), numero, str(data_doc), descrizione, round(float(totale) - float(iva), 2), float(iva), float(totale), categoria,
+         modo_pagamento, str(data_doc) if modo_pagamento else None, mov, mov if modo_pagamento else None, xml_base64, data_scadenza])
+    return mov
+
+def registra_fattura_sponsor(w_conn, numero, data_fat, sponsor_id, nome_sponsor, oggetto, imponibile, aliquota, iva_totale, totale, xml_base64=None):
+    """Fattura emessa allo sponsor (regime 398/91): credito per il totale, ricavo per l'imponibile, IVA a debito."""
+    iva_da_versare_50 = round(iva_totale * 0.50, 2)
+    # Legge 398/91: reddito imponibile forfettario = 3% dei proventi; IRES 24% su quel reddito (IRAP esclusa)
+    stima_ires_3 = round(imponibile * 0.03 * 0.24, 2)
+    w_conn.execute(
+        "INSERT INTO fatture_sponsor_398 (numero_fattura, data_fattura, sponsor_id, oggetto_contratto, imponibile, aliquota_iva, iva_totale, "
+        "totale_fattura, iva_da_versare_50, stima_ires_3, xml_base64) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [str(numero).strip(), str(data_fat), int(sponsor_id), str(oggetto).strip(), float(imponibile), float(aliquota), float(iva_totale),
+         float(totale), iva_da_versare_50, stima_ires_3, xml_base64])
+    righe_journal = [
+        (get_conto_id(w_conn, "10.02.002"), f"Credito v/Sponsor {nome_sponsor}", float(totale), 0.0),
+        (get_conto_id(w_conn, "50.02.001"), "Ricavo Sponsor 398", 0.0, float(imponibile)),
+    ]
+    if iva_totale:
+        righe_journal.append((get_conto_id(w_conn, "20.02.001"), f"IVA {aliquota:g}% Commerciale a Debito", 0.0, float(iva_totale)))
+    return post_journal(w_conn, data_fat, numero, f"Fattura Sponsor {nome_sponsor}", "COMMERCIALE_398", righe_journal)
+
+def anagrafica_da_fattura(w_conn, tipo, soggetto):
+    """Fornitore o sponsor della fattura elettronica: lo stesso se esiste già (stessa partita IVA o codice fiscale), altrimenti nuovo.
+    Dell'anagrafica esistente si completano solo i dati mancanti."""
+    piva, cf = soggetto.get("partita_iva"), soggetto.get("codice_fiscale")
+    trovato = w_conn.execute(
+        "SELECT id FROM anagrafiche WHERE tipo = ? AND ((partita_iva IS NOT NULL AND partita_iva = ?) OR (codice_fiscale IS NOT NULL AND UPPER(codice_fiscale) = UPPER(?))) "
+        "ORDER BY id LIMIT 1", [tipo, piva or "", cf or ""]).fetchone()
+    campi = ["partita_iva", "codice_fiscale", "indirizzo", "cap", "comune", "provincia", "codice_destinatario"]
+    if trovato:
+        aid = int(trovato[0])
+        for campo in campi:
+            if soggetto.get(campo):
+                w_conn.execute(f"UPDATE anagrafiche SET {campo} = ? WHERE id = ? AND ({campo} IS NULL OR {campo} = '' OR {campo} = '0000000')",
+                               [soggetto[campo], aid])
+        return aid
+    return int(w_conn.execute(
+        "INSERT INTO anagrafiche (tipo, denominazione, " + ", ".join(campi) + ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [tipo, soggetto["denominazione"]] + [soggetto.get(c) or (None if c != "codice_destinatario" else "0000000") for c in campi]).lastrowid)
+
+def importa_fatture_elettroniche(chiave):
+    """Caricamento dei file delle fatture elettroniche (XML o p7m): le ricevute dai fornitori diventano spese, quelle emesse
+    agli sponsor fatture 398/91; fornitori e sponsor nuovi entrano in anagrafica da soli e le fatture già caricate si saltano."""
+    with st.expander("📥 Importa fatture elettroniche (file XML o p7m, anche scaricati dal cassetto fiscale)"):
+        societa = dati_societa()
+        if not (societa.get("partita_iva") or societa.get("codice_fiscale")):
+            st.warning("Completa partita IVA o codice fiscale dell'associazione (pagina Ricevute, in alto): servono per capire se una fattura è ricevuta o emessa.")
+            return
+        st.caption("Le fatture ricevute vanno nelle spese per il totale lordo (l'IVA resta come dato informativo); quelle emesse agli sponsor "
+                   "tra le fatture 398/91 con l'IVA a debito. Fornitori e sponsor nuovi entrano in anagrafica da soli; il file resta salvato con la fattura.")
+        files = st.file_uploader("File delle fatture", type=["xml", "p7m"], accept_multiple_files=True, key=f"fe_file_{chiave}")
+        if not files:
+            return
+        lette = []
+        for file_fe in files:
+            try:
+                testo_xml, fatture_fe = fattura_xml.leggi_file(file_fe.name, file_fe.getvalue())
+            except Exception as ex_fe:
+                st.error(f"{file_fe.name}: {ex_fe}")
+                continue
+            for fe in fatture_fe:
+                verso = fattura_xml.direzione(fe, societa.get("partita_iva"), societa.get("codice_fiscale"))
+                if verso is None:
+                    st.error(f"{file_fe.name}: la fattura {fe['numero']} non è intestata all'associazione né emessa da lei.")
+                else:
+                    lette.append((file_fe.name, base64.b64encode(testo_xml).decode("ascii"), fe, verso))
+        if not lette:
+            return
+
+        df_cat_fe = leggi_df("SELECT codice, nome FROM piano_dei_conti WHERE livello = 3 AND tipo = 'COSTO' ORDER BY codice")
+        categorie_fe = {f"{r.nome} ({r.codice})": r.codice for r in df_cat_fe.itertuples()}
+        per_codice = {v: k for k, v in categorie_fe.items()}
+        df_passive = leggi_df("SELECT f.numero_doc, f.data_doc, f.categoria_spesa, a.partita_iva, a.codice_fiscale FROM fatture_passive f "
+                              "JOIN anagrafiche a ON a.id = f.fornitore_id ORDER BY f.id")
+        df_attive = leggi_df("SELECT numero_fattura, data_fattura FROM fatture_sponsor_398")
+        righe_fe, viste = [], set()
+        for nome_f, _, fe, verso in lette:
+            altro = fe["cedente"] if verso == "PASSIVA" else fe["cessionario"]
+            ident = {x for x in (altro["partita_iva"], altro["codice_fiscale"]) if x}
+            chiave_fe = (verso, frozenset(ident), fe["numero"], fe["data"])
+            doppia = chiave_fe in viste  # stessa fattura caricata due volte (es. XML e p7m)
+            viste.add(chiave_fe)
+            if verso == "PASSIVA":
+                stesse = df_passive[df_passive["partita_iva"].isin(ident) | df_passive["codice_fiscale"].isin(ident)]
+                gia = bool(((stesse["numero_doc"] == fe["numero"]) & (stesse["data_doc"] == fe["data"])).any())
+                categoria = per_codice.get(stesse["categoria_spesa"].iloc[-1]) if not stesse.empty else None  # come l'ultima spesa del fornitore
+            else:
+                gia = bool(((df_attive["numero_fattura"] == fe["numero"]) & (df_attive["data_fattura"].str[:4] == fe["data"][:4])).any())
+                categoria = None
+            gia = gia or doppia
+            righe_fe.append({"Importa": not gia, "Tipo": "Ricevuta (spesa)" if verso == "PASSIVA" else "Emessa (sponsor)",
+                             "Data": datetime.date.fromisoformat(fe["data"]), "Numero": fe["numero"], "Fornitore o sponsor": altro["denominazione"],
+                             "Descrizione": fe["descrizione"], "Totale (€)": fe["totale"], "di cui IVA (€)": fe["iva"],
+                             "Già caricata": "sì" if gia else "", "Categoria": categoria,
+                             "Pagamento": "Da pagare" if verso == "PASSIVA" else ""})
+        ed_fe = st.data_editor(pd.DataFrame(righe_fe), hide_index=True, width="stretch", key=f"fe_tab_{chiave}",
+                               disabled=["Tipo", "Data", "Numero", "Fornitore o sponsor", "Totale (€)", "di cui IVA (€)", "Già caricata"],
+                               column_config={
+                                   "Data": st.column_config.DateColumn(format="DD/MM/YYYY"),
+                                   "Totale (€)": st.column_config.NumberColumn(format="%.2f"),
+                                   "di cui IVA (€)": st.column_config.NumberColumn(format="%.2f"),
+                                   "Categoria": st.column_config.SelectboxColumn(options=list(categorie_fe), width="large",
+                                                                                 help="Solo per le spese: conto di costo."),
+                                   "Pagamento": st.column_config.SelectboxColumn(options=["Da pagare"] + [f"Pagata con {m}" for m in CONTI_PAGAMENTO_SPESE] + [""],
+                                                                                 help="Solo per le spese. Se la paghi dopo, registra il pagamento dalla lista delle spese da pagare.")})
+        st.caption("Le fatture già caricate non sono spuntate. Per le spese scegli la categoria: l'app propone quella dell'ultima spesa dello stesso fornitore. "
+                   "Le fatture emesse arrivano come credito verso lo sponsor: l'incasso si registra quando arriva il pagamento.")
+        if st.button("💾 Importa le fatture spuntate", type="primary", key=f"fe_importa_{chiave}"):
+            scelte = [(i, r) for i, r in ed_fe.iterrows() if r["Importa"]]
+            mancano = [r["Numero"] for i, r in scelte if lette[i][3] == "PASSIVA" and not r["Categoria"]]
+            note_attive = [r["Numero"] for i, r in scelte if lette[i][3] == "ATTIVA" and lette[i][2]["totale"] < 0]
+            if not scelte:
+                st.error("Spunta almeno una fattura da importare.")
+            elif mancano:
+                st.error("Scegli la categoria per le spese: " + ", ".join(mancano) + ".")
+            elif note_attive:
+                st.error("Le note di credito emesse vanno registrate a mano (pagina Sponsor): " + ", ".join(note_attive) + ".")
+            else:
+                try:
+                    with db_write() as w_conn:
+                        for i, r in scelte:
+                            _, xml_b64, fe, verso = lette[i]
+                            if verso == "PASSIVA":
+                                fid = anagrafica_da_fattura(w_conn, "FORNITORE", fe["cedente"])
+                                modo = None if r["Pagamento"] in ("Da pagare", "", None) else str(r["Pagamento"]).replace("Pagata con ", "")
+                                registra_spesa(w_conn, fid, fe["cedente"]["denominazione"], fe["numero"], fe["data"],
+                                               str(r["Descrizione"] or "").strip() or "Fattura " + fe["numero"], categorie_fe[r["Categoria"]],
+                                               fe["totale"], fe["iva"], modo, xml_b64, fe["scadenza"])
+                            else:
+                                # Il numero è quello della fattura elettronica già emessa: si controlla solo che non sia già registrato
+                                if w_conn.execute("SELECT COUNT(*) FROM fatture_sponsor_398 WHERE numero_fattura = ? AND substr(data_fattura, 1, 4) = ?",
+                                                  [fe["numero"], fe["data"][:4]]).fetchone()[0]:
+                                    raise ValueError(f"la fattura emessa {fe['numero']} del {fe['data'][:4]} è già registrata")
+                                sid = anagrafica_da_fattura(w_conn, "SPONSOR", fe["cessionario"])
+                                aliquote = [a["aliquota"] for a in fe["aliquote"] if a["imposta"]]
+                                registra_fattura_sponsor(w_conn, fe["numero"], fe["data"], sid, fe["cessionario"]["denominazione"],
+                                                         str(r["Descrizione"] or "").strip() or "Sponsorizzazione", fe["imponibile"],
+                                                         aliquote[0] if aliquote else 0.0, fe["iva"], fe["totale"], xml_b64)
+                    st.session_state["flash"] = f"{len(scelte)} fatture elettroniche importate."
+                    st.rerun()
+                except Exception as ex_imp:
+                    st.error(f"Fatture non importate (nessuna è stata salvata): {ex_imp}")
+
 def pagina_spese():
     st.subheader("🧾 Spese e fornitori")
     st.caption("Registra ogni spesa (affitto campi, materiale, visite mediche, utenze…): l'app la scrive in prima nota da sola. "
                "Se non è ancora pagata resta come debito verso il fornitore finché non registri il pagamento.")
-    CONTI_PAGAMENTO = {"BONIFICO": "10.01.001", "POS / CARTA": "10.01.001", "PAYPAL": "10.01.003", "CONTANTI": "10.01.002"}
+    CONTI_PAGAMENTO = CONTI_PAGAMENTO_SPESE
+    importa_fatture_elettroniche("spese")
     df_cat = leggi_df("SELECT id, codice, nome FROM piano_dei_conti WHERE livello = 3 AND tipo = 'COSTO' ORDER BY codice")
     categorie = {f"{r.nome} ({r.codice})": r.codice for r in df_cat.itertuples()}
     df_forn = leggi_df("SELECT id, denominazione, partita_iva, codice_fiscale FROM anagrafiche WHERE tipo = 'FORNITORE' ORDER BY denominazione")
@@ -3537,15 +3687,8 @@ def pagina_spese():
                             id_forn = w_conn.execute(
                                 "INSERT INTO anagrafiche (tipo, denominazione, partita_iva, codice_fiscale) VALUES ('FORNITORE', ?, ?, ?)",
                                 [nome_forn, codice_id if codice_id.isdigit() else None, None if codice_id.isdigit() else (codice_id or None)]).lastrowid
-                        conto_avere = CONTI_PAGAMENTO[modo_sp] if modo_sp else "20.01.001"
-                        mov_sp = post_journal(w_conn, data_sp, num_sp.strip() or "Spesa", f"{descr_sp.strip() or cat_sp.split(' (')[0]} - {nome_forn}",
-                                              "ISTITUZIONALE", [(get_conto_id(w_conn, categorie[cat_sp]), descr_sp.strip(), float(totale_sp), 0.0),
-                                                                (get_conto_id(w_conn, conto_avere), "Pagamento" if modo_sp else "Debito verso fornitore", 0.0, float(totale_sp))])
-                        w_conn.execute(
-                            "INSERT INTO fatture_passive (fornitore_id, numero_doc, data_doc, causale_spesa, imponibile, iva, totale, categoria_spesa, "
-                            "modalita_pagamento, data_pagamento, movimento_id, movimento_pagamento_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                            [int(id_forn), num_sp.strip(), str(data_sp), descr_sp.strip(), round(totale_sp - iva_sp, 2), float(iva_sp), float(totale_sp),
-                             categorie[cat_sp], modo_sp, str(data_sp) if modo_sp else None, mov_sp, mov_sp if modo_sp else None])
+                        registra_spesa(w_conn, id_forn, nome_forn, num_sp.strip(), data_sp, descr_sp.strip() or cat_sp.split(" (")[0],
+                                       categorie[cat_sp], totale_sp, iva_sp, modo_sp)
                     st.session_state["flash"] = f"Spesa di € {totale_sp:,.2f} registrata" + (" e pagata." if modo_sp else ": risulta da pagare.")
                     st.rerun()
                 except Exception as ex_sp:
@@ -3553,13 +3696,17 @@ def pagina_spese():
 
     df_sp = leggi_df(
         "SELECT f.id, f.data_doc, a.denominazione AS fornitore, f.numero_doc, f.causale_spesa, f.categoria_spesa, f.totale, f.iva, "
-        "f.modalita_pagamento, f.data_pagamento FROM fatture_passive f JOIN anagrafiche a ON a.id = f.fornitore_id ORDER BY f.data_doc DESC, f.id DESC")
+        "f.modalita_pagamento, f.data_pagamento, f.data_scadenza FROM fatture_passive f JOIN anagrafiche a ON a.id = f.fornitore_id ORDER BY f.data_doc DESC, f.id DESC")
     nomi_cat = {r.codice: r.nome for r in df_cat.itertuples()}
     da_pagare = df_sp[df_sp["data_pagamento"].isna()] if not df_sp.empty else df_sp
     if not da_pagare.empty:
         with st.expander(f"⏳ Spese da pagare: {len(da_pagare)}, totale € {da_pagare['totale'].sum():,.2f}", expanded=True):
-            opz_pag = {f"{r.fornitore} · {r.numero_doc or 's.n.'} del {pd.to_datetime(r.data_doc).strftime('%d/%m/%Y')} · € {float(r.totale):,.2f}": int(r.id)
+            opz_pag = {f"{r.fornitore} · {r.numero_doc or 's.n.'} del {pd.to_datetime(r.data_doc).strftime('%d/%m/%Y')} · € {float(r.totale):,.2f}"
+                       + (f" · scade il {pd.to_datetime(r.data_scadenza).strftime('%d/%m/%Y')}" if pd.notna(r.data_scadenza) and r.data_scadenza else ""): int(r.id)
                        for r in da_pagare.itertuples()}
+            scadute = da_pagare[da_pagare["data_scadenza"].notna() & (da_pagare["data_scadenza"] < datetime.date.today().isoformat())]
+            if not scadute.empty:
+                st.warning(f"⚠️ {len(scadute)} spese con la scadenza di pagamento già passata: € {scadute['totale'].sum():,.2f}")
             with st.form("paga_spesa"):
                 q1, q2, q3 = st.columns([3, 1, 1])
                 sp_sel = q1.selectbox("Spesa", list(opz_pag))

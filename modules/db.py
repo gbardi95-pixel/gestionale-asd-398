@@ -654,6 +654,10 @@ def init_db(versione_schema=None):
         "ALTER TABLE compensi_sportivi ADD COLUMN movimento_id INTEGER;",
         # Ricevuta: copia del PDF com'era al momento dell'emissione
         "ALTER TABLE ricevute_istituzionali ADD COLUMN pdf_base64 TEXT;",
+        # Fatture elettroniche importate: copia del file XML e scadenza del pagamento
+        "ALTER TABLE fatture_passive ADD COLUMN xml_base64 TEXT;",
+        "ALTER TABLE fatture_passive ADD COLUMN data_scadenza TEXT;",
+        "ALTER TABLE fatture_sponsor_398 ADD COLUMN xml_base64 TEXT;",
     ):
         try:
             cursor.execute(alter_sql)
