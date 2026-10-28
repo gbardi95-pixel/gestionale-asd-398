@@ -15,7 +15,7 @@ RUOLI = {
 # Pagine (url_path del menu) che ogni ruolo vede; None = tutte
 PAGINE_RUOLO = {
     "ADMIN": None,
-    "SEGRETERIA": {"dashboard", "account", "soci", "distinte", "convocazioni", "ricevute", "sponsor", "spese", "collaboratori",
+    "SEGRETERIA": {"dashboard", "account", "tesseramento", "soci", "distinte", "convocazioni", "ricevute", "sponsor", "spese", "collaboratori",
                    "prima-nota", "preventivo", "parametri", "piano-dei-conti", "backup"},
     "ALLENATORE": {"account", "convocazioni", "distinte"},
     "CONSULTAZIONE": {"dashboard", "account", "prima-nota", "preventivo"},

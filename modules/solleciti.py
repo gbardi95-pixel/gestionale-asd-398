@@ -47,6 +47,13 @@ def componi(modello, nome, quota, arretrati, esercizio, pagamento, societa):
     return re.sub(r" {2,}", " ", testo).strip()
 
 
+def testo_ricevuta(nome, ricevute, societa):
+    """Messaggio che accompagna le ricevute appena emesse: ricevute = [(numero, causale, importo), ...]."""
+    elenco_ric = "; ".join(f"n. {n} ({c}) di {euro(i)}" for n, c, i in ricevute)
+    parola = "le ricevute" if len(ricevute) > 1 else "la ricevuta"
+    return f"Ciao {nome}, grazie per il versamento: ti mandiamo {parola} {elenco_ric}. {societa or ''}".strip()
+
+
 TESTO_CERTIFICATO = (
     "Ciao {nome}, il tuo certificato medico per l'attività sportiva {situazione}. "
     "Senza certificato valido non puoi allenarti né giocare: portaci quello nuovo appena puoi. Grazie! {societa}"

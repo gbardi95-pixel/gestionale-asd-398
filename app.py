@@ -453,6 +453,39 @@ def numero_successivo(numero):
     m = re.fullmatch(r"\s*(\d+)\s*/\s*(\d{4})\s*", str(numero))
     return f"{int(m.group(1)) + 1}/{m.group(2)}" if m else None
 
+def dividi_incasso(aid, data_ric, num_ric, tipo_causale, importo, pregresso, dividi_erog, da_versare=None):
+    """(quota, erogazione liberale, numero della seconda ricevuta) di un incasso; ValueError se non si può emettere.
+
+    Fino alla quota ancora dovuta nell'esercizio è quota, il resto è erogazione liberale (seconda ricevuta).
+    da_versare: quota ancora dovuta se già nota (persona appena inserita); altrimenti si calcola dalle ricevute dell'esercizio.
+    """
+    quota_ric, erog_ric = round(float(importo), 2), 0.0
+    if dividi_erog and tipo_causale != CAUSALE_EROGAZIONE and not pregresso:
+        if da_versare is None:
+            ini_q, fin_q, etich_q = esercizio.periodo_esercizio(data_ric, mese_inizio_esercizio())
+            df_t_q, df_v_q = dati_quote(ini_q, fin_q)
+            sit_q = quote.situazione_quote(df_t_q, parametri_esercizio(etich_q), df_v_q)
+            riga_q = sit_q[sit_q["anagrafica_id"] == aid]
+            da_versare = float(riga_q["Da versare (€)"].iloc[0]) if not riga_q.empty else None
+        if da_versare is not None:
+            quota_ric, erog_ric = quote.dividi_versamento(importo, da_versare)
+    num_erog = numero_successivo(num_ric) if erog_ric and quota_ric else None
+    if erog_ric and not quota_ric:
+        raise ValueError("Questa persona ha già versato tutta la quota dell'esercizio. Se la somma è un'erogazione liberale scegli "
+                         "la tipologia «Erogazione Liberale»; se è la quota di un'altra persona emetti la ricevuta a suo nome "
+                         "(con «Pagato da»); altrimenti togli la spunta sulla divisione automatica.")
+    if erog_ric and not num_erog:
+        raise ValueError("Per emettere due ricevute il numero deve essere nella forma numero/anno (es. 12/2026).")
+    conn = get_ro_conn()
+    try:
+        errore_num = controlla_numero_documento(conn, "ricevute_istituzionali", "numero_ricevuta", num_ric, data_ric.year) or (
+            controlla_numero_documento(conn, "ricevute_istituzionali", "numero_ricevuta", num_erog, data_ric.year) if num_erog else None)
+    finally:
+        conn.close()
+    if errore_num:
+        raise ValueError(errore_num)
+    return quota_ric, erog_ric, num_erog
+
 def mese_inizio_esercizio():
     """Mese di inizio dell'esercizio sociale (1 = anno solare, 7 = stagione sportiva 1/7-30/6), impostabile dall'app."""
     df = leggi_df("SELECT valore FROM impostazioni WHERE chiave = 'mese_inizio_esercizio'")
@@ -981,6 +1014,9 @@ def pagina_soci():
                 nome = c1.text_input("Cognome e Nome*")
                 cf = c2.text_input("Codice Fiscale")
                 matricola = c3.text_input("Matricola/Tessera N°")
+                ct1, ct2 = st.columns(2)
+                telefono_n = ct1.text_input("Telefono")
+                email_n = ct2.text_input("Email")
 
                 c4, c5, c6 = st.columns(3)
                 categoria = c4.selectbox("Categoria / Inquadramento", CATEGORIE_LISTA)
@@ -1011,8 +1047,10 @@ def pagina_soci():
                         try:
                             with db_write() as w_conn:
                                 res1 = w_conn.execute(
-                                    "INSERT INTO anagrafiche (tipo, denominazione, codice_fiscale, tipo_documento, numero_documento) VALUES ('SOCIO_CALCIATORE', ?, ?, ?, ?)",
-                                    [str(nome).strip(), str(cf).strip(), str(tipo_doc).strip() or None, str(num_doc).strip() or None]
+                                    "INSERT INTO anagrafiche (tipo, denominazione, codice_fiscale, telefono, email, tipo_documento, numero_documento) "
+                                    "VALUES ('SOCIO_CALCIATORE', ?, ?, ?, ?, ?, ?)",
+                                    [str(nome).strip(), str(cf).strip(), str(telefono_n).strip() or None, str(email_n).strip() or None,
+                                     str(tipo_doc).strip() or None, str(num_doc).strip() or None]
                                 )
                                 anag_id = res1.lastrowid
 
@@ -2027,18 +2065,21 @@ def pagina_ricevute():
                 st.session_state["flash"] = "Dati dell'associazione salvati."
                 st.rerun()
 
-    with st.expander("➕ Aggiungi Nuovo Socio / Persona Fisica in Anagrafica"):
+    if "tesseramento" in pagine_menu:
+        st.page_link(pagine_menu["tesseramento"], label="Tesseramento di una persona nuova, con certificato e ricevuta in un solo passaggio", icon="📝")
+    with st.expander("➕ Aggiungi una persona che non si tessera (es. chi fa un'erogazione liberale)"):
         with st.form("nuovo_socio_fast", clear_on_submit=True):
             s_nome = st.text_input("Cognome e Nome / Ragione Sociale*")
             s_cf = st.text_input("Codice Fiscale")
-            s_email = st.text_input("Email / Telefono")
+            s_tel = st.text_input("Telefono")
+            s_email = st.text_input("Email")
             if st.form_submit_button("Salva Socio"):
                 if s_nome:
                     try:
                         with db_write() as w_conn:
                             w_conn.execute(
-                                "INSERT INTO anagrafiche (tipo, denominazione, codice_fiscale, email) VALUES ('SOCIO_CALCIATORE', ?, ?, ?)",
-                                [str(s_nome).strip(), str(s_cf).strip(), str(s_email).strip()]
+                                "INSERT INTO anagrafiche (tipo, denominazione, codice_fiscale, telefono, email) VALUES ('SOCIO_CALCIATORE', ?, ?, ?, ?)",
+                                [str(s_nome).strip(), str(s_cf).strip().upper() or None, str(s_tel).strip() or None, str(s_email).strip() or None]
                             )
                         st.session_state["flash"] = f"Socio '{s_nome}' aggiunto con successo!"
                         st.rerun()
@@ -2095,32 +2136,8 @@ def pagina_ricevute():
                 elif importo > 0:
                     aid_ric = int(soci_dict[socio_sel])
                     nome_ric = socio_sel.split(" (CF:")[0]
-                    # Divisione automatica: quota ancora dovuta nell'esercizio della ricevuta, il resto come erogazione liberale
-                    quota_ric, erog_ric = round(float(importo), 2), 0.0
-                    if dividi_erog and tipo_causale != CAUSALE_EROGAZIONE and not pregresso:
-                        ini_q, fin_q, etich_q = esercizio.periodo_esercizio(data_ric, mese_inizio_esercizio())
-                        df_t_q, df_v_q = dati_quote(ini_q, fin_q)
-                        sit_q = quote.situazione_quote(df_t_q, parametri_esercizio(etich_q), df_v_q)
-                        riga_q = sit_q[sit_q["anagrafica_id"] == aid_ric]
-                        if not riga_q.empty:
-                            quota_ric, erog_ric = quote.dividi_versamento(importo, float(riga_q["Da versare (€)"].iloc[0]))
-                    num_erog = numero_successivo(num_ric) if erog_ric and quota_ric else None
                     try:
-                        if erog_ric and not quota_ric:
-                            raise ValueError("Questa persona ha già versato tutta la quota dell'esercizio. Se la somma è un'erogazione liberale scegli "
-                                             "la tipologia «Erogazione Liberale»; se è la quota di un'altra persona emetti la ricevuta a suo nome "
-                                             "(con «Pagato da»); altrimenti togli la spunta sulla divisione automatica.")
-                        if erog_ric and not num_erog:
-                            raise ValueError("Per emettere due ricevute il numero deve essere nella forma numero/anno (es. 12/2026).")
-                        conn = get_ro_conn()
-                        try:
-                            errore_num = controlla_numero_documento(conn, "ricevute_istituzionali", "numero_ricevuta", num_ric, data_ric.year) or (
-                                controlla_numero_documento(conn, "ricevute_istituzionali", "numero_ricevuta", num_erog, data_ric.year) if num_erog else None)
-                        finally:
-                            conn.close()
-                        if errore_num:
-                            raise ValueError(errore_num)
-
+                        quota_ric, erog_ric, num_erog = dividi_incasso(aid_ric, data_ric, num_ric, tipo_causale, importo, pregresso, dividi_erog)
                         with db_write() as w_conn:
                             emetti_ricevuta(w_conn, num_ric, data_ric, aid_ric, tipo_causale, causale_custom, quota_ric, pagamento, pregresso,
                                             versante_nome, versante_cf, nome_ric)
@@ -2160,22 +2177,199 @@ def pagina_ricevute():
     df_ric = leggi_df(
         """
         SELECT r.id, r.numero_ricevuta as 'N. Ricevuta', r.data_emissione as Data, a.denominazione as Socio,
-               r.versante_nome as 'Pagato da', r.causale as Causale, r.importo as 'Importo (€)', r.modalita_pagamento as Pagamento
+               r.versante_nome as 'Pagato da', r.causale as Causale, r.importo as 'Importo (€)', r.modalita_pagamento as Pagamento,
+               a.telefono, a.email
         FROM ricevute_istituzionali r
         JOIN anagrafiche a ON r.anagrafica_id = a.id
         ORDER BY r.id DESC
         """)
-    st.dataframe(df_ric.drop(columns=["id"]), width="stretch", hide_index=True)
+    st.dataframe(df_ric.drop(columns=["id", "telefono", "email"]), width="stretch", hide_index=True)
     if not df_ric.empty:
         etichette_ric = {f"N. {r['N. Ricevuta']} · {r['Socio']} · € {float(r['Importo (€)']):,.2f}": int(r["id"]) for _, r in df_ric.iterrows()}
-        p1, p2 = st.columns([3, 1])
-        scelta_ric = p1.selectbox("Ricevuta da stampare o inviare", list(etichette_ric), key="ric_pdf_sel")
+        scelta_ric = st.selectbox("Ricevuta da stampare o inviare", list(etichette_ric), key="ric_pdf_sel")
         if mancanti_soc:
-            p1.caption("⚠️ Completa i dati dell'associazione (in alto) prima di consegnare le ricevute: " + ", ".join(mancanti_soc) + ".")
-        id_ric = etichette_ric[scelta_ric]
-        p2.download_button("📄 Scarica PDF", pdf_ricevuta(id_ric, tuple(sorted(societa_ric.items()))),
-                           file_name=f"ricevuta_{df_ric.loc[df_ric['id'] == id_ric, 'N. Ricevuta'].iloc[0].replace('/', '-')}.pdf",
-                           mime="application/pdf", key="ric_pdf_btn")
+            st.caption("⚠️ Completa i dati dell'associazione (in alto) prima di consegnare le ricevute: " + ", ".join(mancanti_soc) + ".")
+        r_sel = df_ric[df_ric["id"] == etichette_ric[scelta_ric]].iloc[0]
+        vuoto = lambda v: "" if v is None or pd.isna(v) else str(v)
+        azioni_ricevute([(int(r_sel["id"]), r_sel["N. Ricevuta"], r_sel["Causale"], float(r_sel["Importo (€)"]))],
+                        r_sel["Socio"], vuoto(r_sel["telefono"]), vuoto(r_sel["email"]), "ric_reg")
+
+def azioni_ricevute(ricevute, nome, telefono, email, chiave):
+    """PDF delle ricevute e messaggio pronto per WhatsApp o email (ricevute = [(id, numero, causale, importo), ...])."""
+    societa = dati_societa()
+    testo = solleciti.testo_ricevuta(nome, [(n, c, i) for _, n, c, i in ricevute], societa.get("denominazione") or NOME_SOCIETA)
+    for rid, numero, _, _ in ricevute:
+        st.download_button(f"📄 PDF ricevuta {numero}", pdf_ricevuta(rid, tuple(sorted(societa.items()))),
+                           file_name=f"ricevuta_{str(numero).replace('/', '-')}.pdf", mime="application/pdf",
+                           key=f"{chiave}_pdf_{rid}", width="stretch")
+    link_wa = solleciti.link_whatsapp(telefono, testo)
+    link_mail = solleciti.link_email(email, "Ricevuta di pagamento", testo)
+    if link_wa:
+        st.link_button("💬 Invia su WhatsApp", link_wa, width="stretch")
+    if link_mail:
+        st.link_button("✉️ Invia per email", link_mail, width="stretch")
+    if link_wa or link_mail:
+        st.caption("Il collegamento apre il messaggio già scritto ma non può allegare il file: scarica il PDF e allegalo tu nella chat o nell'email.")
+    else:
+        st.caption("Telefono ed email mancanti: aggiungili nella scheda della persona per inviare la ricevuta.")
+
+# ---------------------------------------------------------
+# 3-bis. NUOVO TESSERAMENTO (pensato per il telefono: una colonna, solo i dati che servono al campo)
+# ---------------------------------------------------------
+ETICHETTE_SQUADRE = {"PRIMA_SQUADRA": "Prima squadra", "JUNIORES": "Juniores", "ALLIEVI": "Allievi", "GIOVANISSIMI": "Giovanissimi",
+                     "SCUOLA_CALCIO": "Scuola calcio", "STAFF": "Staff"}
+# tipo di tesseramento -> (tipo tessera, gioca, socio di un'altra società)
+TIPI_TESSERAMENTO = {"Atleta": ("A", True, False), "Dirigente": ("D", False, False), "Dirigente che gioca": ("D/A", True, False),
+                     "Socio di un'altra società (qui solo scheda attività)": (None, True, True)}
+RUOLI_TESSERAMENTO = {True: ["Portiere", "Difensore", "Centrocampista", "Attaccante"],
+                      False: ["Dirigente", "Dirigente Accompagnatore", "Allenatore", "Segretario", "Presidente", "Vice Presidente", "Consigliere", "Socio"]}
+PAGAMENTI = {"CONTANTI": "Contanti", "BONIFICO": "Bonifico", "POS": "POS", "PAYPAL": "PayPal"}
+
+def pagina_tesseramento():
+    st.subheader("📝 Nuovo tesseramento")
+    esito = st.session_state.get("esito_tesseramento")
+    if esito:
+        st.success(esito["messaggio"])
+        if esito["ricevute"]:
+            azioni_ricevute(esito["ricevute"], esito["nome"], esito["telefono"], esito["email"], "tess_esito")
+        if st.button("➕ Nuovo tesseramento", type="primary", width="stretch"):
+            st.session_state.pop("esito_tesseramento")
+            st.session_state["tess_n"] = st.session_state.get("tess_n", 0) + 1
+            st.rerun()
+        return
+
+    k = f"tess{st.session_state.get('tess_n', 0)}_"  # chiavi nuove a ogni tesseramento: i campi ripartono vuoti
+    oggi = datetime.date.today()
+    ini_t, fin_t, etich_t = esercizio.periodo_esercizio(oggi, mese_inizio_esercizio())
+    parametri_t = parametri_esercizio(etich_t)
+    nuova = st.segmented_control("Persona", ["Nuova", "Già in anagrafica"], default="Nuova", key=k + "chi",
+                                 label_visibility="collapsed") != "Già in anagrafica"
+
+    if nuova:
+        st.markdown("**👤 Persona**")
+        nome = st.text_input("Cognome e nome*", key=k + "nome")
+        cf = st.text_input("Codice fiscale", key=k + "cf", max_chars=16)
+        telefono = st.text_input("Telefono (per WhatsApp)", key=k + "tel", placeholder="es. 333 1234567")
+        email = st.text_input("Email", key=k + "email")
+        tipo_t = st.selectbox("Tesseramento", list(TIPI_TESSERAMENTO), key=k + "tipo")
+        tipo_tessera, gioca, socio_altrove = TIPI_TESSERAMENTO[tipo_t]
+        squadra = st.selectbox("Squadra", list(ETICHETTE_SQUADRE), format_func=ETICHETTE_SQUADRE.get,
+                               index=list(ETICHETTE_SQUADRE).index("STAFF" if not gioca else "PRIMA_SQUADRA"), key=k + "sq")
+        ruolo = st.selectbox("Ruolo", RUOLI_TESSERAMENTO[gioca], key=k + "ruolo")
+        with st.expander("Tessera e documento (facoltativi)"):
+            matricola = st.text_input("Numero tessera o scheda attività", key=k + "mat")
+            tipo_doc = st.text_input("Documento d'identità (es. CIE, C.I., PT)", key=k + "tdoc")
+            num_doc = st.text_input("Numero del documento", key=k + "ndoc")
+        data_ril = data_scad = None
+        if gioca:
+            st.markdown("**🩺 Certificato medico**")
+            st.caption("Se non è ancora stato consegnato lascia vuoto: comparirà tra i certificati mancanti.")
+            data_ril = st.date_input("Rilasciato il", value=None, format="DD/MM/YYYY", key=k + "ril")
+            data_scad = st.date_input("Scade il", value=None, format="DD/MM/YYYY", key=k + "scad")
+        riga_quota = pd.DataFrame([{"anagrafica_id": 0, "denominazione": nome, "categoria": squadra, "tipo_tessera": tipo_tessera,
+                                    "gioca": int(gioca), "numero_scheda_attivita": None, "socio_altra_societa": int(socio_altrove),
+                                    "quota_stagionale": 0}])
+        da_versare = float(quote.situazione_quote(riga_quota, parametri_t, None)["Da versare (€)"].iloc[0])
+        aid = None
+    else:
+        df_pers = leggi_df("SELECT id, denominazione, codice_fiscale, telefono, email FROM anagrafiche "
+                           "WHERE tipo IN ('SOCIO_CALCIATORE', 'ALTRO') ORDER BY denominazione")
+        if df_pers.empty:
+            st.info("Nessuna persona in anagrafica.")
+            return
+        aid = st.selectbox("Chi paga la quota", [int(x) for x in df_pers["id"]], index=None, placeholder="Scrivi il nome per cercare",
+                           format_func=lambda x: df_pers.loc[df_pers["id"] == x, "denominazione"].iloc[0], key=k + "pers")
+        if aid is None:
+            return
+        pers = df_pers[df_pers["id"] == aid].iloc[0]
+        nome = pers["denominazione"]
+        testo_o_vuoto = lambda v: "" if v is None or pd.isna(v) else str(v)
+        telefono = st.text_input("Telefono (per WhatsApp)", value=testo_o_vuoto(pers["telefono"]), key=k + "tel")
+        email = st.text_input("Email", value=testo_o_vuoto(pers["email"]), key=k + "email")
+        df_t, df_v = dati_quote(ini_t, fin_t)
+        sit = quote.situazione_quote(df_t, parametri_t, df_v)
+        riga = sit[sit["anagrafica_id"] == aid]
+        da_versare = float(riga["Da versare (€)"].iloc[0]) if not riga.empty else None
+        socio_altrove = bool(leggi_df("SELECT COALESCE(MAX(socio_altra_societa), 0) AS s FROM tesserati_calcio WHERE anagrafica_id = ?",
+                                      [aid])["s"].iloc[0])
+        if da_versare is None:
+            st.caption("Questa persona non è tra i tesserati attivi: l'importo non viene proposto.")
+
+    st.markdown("**💶 Quota**")
+    incassa = st.toggle("Incassa ora la quota ed emetti la ricevuta", value=True, key=k + "incassa")
+    importo = pagamento = None
+    versante_nome = versante_cf = ""
+    if incassa:
+        if da_versare is not None:
+            st.caption(f"Quota ancora da versare per la stagione {etich_t}: {solleciti.euro(max(da_versare, 0))}"
+                       + (" (quote della stagione non ancora impostate in Parametri stagione)" if parametri_t.empty else ""))
+        importo = st.number_input("Importo incassato (€)", min_value=0.0, step=5.0, value=max(float(da_versare or 0), 0.0),
+                                  key=f"{k}imp_{da_versare}")
+        pagamento = st.segmented_control("Pagamento", list(PAGAMENTI), format_func=PAGAMENTI.get, key=k + "pag")
+        if pagamento == "CONTANTI":
+            st.caption("Per la detrazione delle spese sportive dei ragazzi serve un pagamento tracciabile (non contanti).")
+        with st.expander("Paga un genitore o un'altra persona"):
+            versante_nome = st.text_input("Nome di chi paga", key=k + "vnome",
+                                          help="Per la detrazione delle spese sportive dei figli la ricevuta deve indicare chi ha pagato.")
+            versante_cf = st.text_input("Codice fiscale di chi paga", key=k + "vcf", max_chars=16)
+
+    if not st.button("💾 Salva" + (" ed emetti la ricevuta" if incassa else " il tesseramento"), type="primary", width="stretch", key=k + "salva"):
+        return
+    nome = str(nome or "").strip()
+    cf = str(cf).strip().upper() if nuova else ""
+    errore = None
+    if nuova and not nome:
+        errore = "Scrivi cognome e nome."
+    elif nuova and cf and not leggi_df("SELECT id FROM anagrafiche WHERE UPPER(codice_fiscale) = ?", [cf]).empty:
+        errore = "Questo codice fiscale è già in anagrafica: scegli «Già in anagrafica»."
+    elif nuova and data_ril and data_scad and data_scad <= data_ril:
+        errore = "La scadenza del certificato deve essere dopo la data di rilascio."
+    elif incassa and not importo:
+        errore = "Scrivi l'importo incassato, oppure togli «Incassa ora la quota»."
+    elif incassa and not pagamento:
+        errore = "Scegli come è stato pagato."
+    if errore:
+        st.error(errore)
+        return
+    causale = "Quota Iscrizione e Frequenza Campionato" if socio_altrove else "Quota Associativa Annua"
+    dettaglio = f"Anno {oggi.year}"
+    num_ric = f"{prossimo_numero('ricevute_istituzionali', 'numero_ricevuta', 'data_emissione', str(oggi.year))}/{oggi.year}"
+    try:
+        quota_ric, erog_ric, num_erog = (dividi_incasso(aid, oggi, num_ric, causale, importo, False, not parametri_t.empty, da_versare)
+                                         if incassa else (0.0, 0.0, None))
+        ricevute = []
+        with db_write() as w_conn:
+            if nuova:
+                aid = w_conn.execute(
+                    "INSERT INTO anagrafiche (tipo, denominazione, codice_fiscale, telefono, email, tipo_documento, numero_documento) "
+                    "VALUES ('SOCIO_CALCIATORE', ?, ?, ?, ?, ?, ?)",
+                    [nome, cf or None, telefono.strip() or None, email.strip() or None, tipo_doc.strip() or None, num_doc.strip() or None]).lastrowid
+                w_conn.execute(
+                    "INSERT INTO tesserati_calcio (anagrafica_id, numero_tessera, tipo_tessera, categoria, ruolo, data_tesseramento, quota_stagionale, "
+                    "gioca, socio_altra_societa) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)",
+                    [int(aid), matricola.strip() or None, tipo_tessera, squadra, ruolo, str(oggi), int(gioca), int(socio_altrove)])
+                if gioca and data_scad:
+                    w_conn.execute(
+                        "INSERT INTO certificati_medici (anagrafica_id, tipo, data_rilascio, data_scadenza, medico_certificatore, stato_idoneita) "
+                        "VALUES (?, 'AGONISTICO', ?, ?, '', 'IDONEO')", [int(aid), str(data_ril or ""), str(data_scad)])
+            else:
+                w_conn.execute("UPDATE anagrafiche SET telefono = ?, email = ? WHERE id = ?",
+                               [telefono.strip() or None, email.strip() or None, int(aid)])
+            if quota_ric:
+                rid = emetti_ricevuta(w_conn, num_ric, oggi, aid, causale, dettaglio, quota_ric, pagamento, False, versante_nome, versante_cf, nome)
+                ricevute.append((rid, num_ric, causale, quota_ric))
+            if num_erog:
+                rid = emetti_ricevuta(w_conn, num_erog, oggi, aid, CAUSALE_EROGAZIONE, dettaglio, erog_ric, pagamento, False,
+                                      versante_nome, versante_cf, nome)
+                ricevute.append((rid, num_erog, CAUSALE_EROGAZIONE, erog_ric))
+    except Exception as ex_t:
+        st.error(f"Non salvato: {ex_t}")
+        return
+    parti = [f"{nome}: " + ("tesseramento salvato" if nuova else "dati aggiornati")]
+    parti += [f"ricevuta n. {n} di {solleciti.euro(i)}" for _, n, _, i in ricevute]
+    st.session_state["esito_tesseramento"] = {"messaggio": ", ".join(parti) + ".", "ricevute": ricevute, "nome": nome,
+                                              "telefono": telefono, "email": email}
+    st.rerun()
 
 # ---------------------------------------------------------
 # 4. SPONSOR & PUBBLICITÀ (REGIME LEGGE 398/91)
@@ -4090,6 +4284,7 @@ MENU = {
         (pagina_dashboard, "Dashboard e scadenze", "📊", "dashboard"),
     ] + ([(pagina_account, "Il mio account", "👤", "account")] if ACCESSI_PERSONALI else []),
     "Tesserati e squadra": [
+        (pagina_tesseramento, "Nuovo tesseramento", "📝", "tesseramento"),
         (pagina_soci, "Soci, atleti e dirigenti", "🏃", "soci"),
         (pagina_distinte, "Distinte di gara", "📋", "distinte"),
         (pagina_squadra, "Convocazioni e presenze", "📣", "convocazioni"),
