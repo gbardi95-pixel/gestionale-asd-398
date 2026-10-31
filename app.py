@@ -1334,7 +1334,8 @@ def pagina_soci():
 
         if not df_people.empty:
             people_dict = {f"{row['denominazione']} (CF: {row['codice_fiscale'] or 'N.D.'})": int(row['id']) for _, row in df_people.iterrows()}
-            selected_label = st.selectbox("Seleziona Persona da Modificare", list(people_dict.keys()))
+            selected_label = st.selectbox("Seleziona Persona da Modificare", list(people_dict.keys()),
+                                          help="Clicca e scrivi una parte del nome o del codice fiscale per filtrare l'elenco.")
             selected_anag_id = int(people_dict[selected_label])
 
             df_a = leggi_df("SELECT denominazione, codice_fiscale, tipo_documento, numero_documento, telefono, email, indirizzo, cap, comune, provincia "
@@ -1938,7 +1939,7 @@ def pagina_distinte():
                 f"{pers[pid]['denominazione']} ({esclusi[pid]})" if pid in pers else str(sal_gioc[pid]["nominativo"]) for pid in non_piu_ammessi))
         sel_gioc = st.multiselect("Giocatori convocati (nell'ordine della distinta)", ammessi, default=def_gioc,
                                   format_func=lambda pid: pers[pid]["denominazione"], key=k + "gioc",
-                                  placeholder="Scegli i giocatori")
+                                  placeholder="Scrivi il nome per cercare o scegli i giocatori")
         with st.expander(f"🚫 Non selezionabili alla data della gara ({sum(1 for pid, m in esclusi.items() if m and pers[pid].get('gioca'))})"):
             st.caption("Solo chi gioca, ha il numero di tessera e un certificato medico valido il giorno della gara può essere messo in distinta.")
             for pid, m in esclusi.items():
@@ -1972,7 +1973,7 @@ def pagina_distinte():
         st.markdown("##### Persone autorizzate ad accedere al terreno di gioco")
         def_dir = [pid for pid in sal_dir if pid in pers]
         sel_dir = st.multiselect("Allenatori e dirigenti", list(pers), default=def_dir,
-                                 format_func=lambda pid: pers[pid]["denominazione"], key=k + "dir", placeholder="Scegli allenatori e dirigenti",
+                                 format_func=lambda pid: pers[pid]["denominazione"], key=k + "dir", placeholder="Scrivi il nome per cercare o scegli",
                                  help="Per una nuova distinta viene proposto lo staff dell'ultima distinta salvata.")
         righe_dir = []
         if sel_dir:
@@ -2644,7 +2645,8 @@ def pagina_lavoro_sportivo():
                              for r in df_persone.itertuples() if int(r.id) not in gia_coll})
         with st.form("nuovo_collaboratore", clear_on_submit=True):
             st.markdown("**➕ Nuovo collaboratore**")
-            pers_sel = st.selectbox("Persona già in anagrafica (soci, dirigenti…) oppure nuova", list(opzioni_pers))
+            pers_sel = st.selectbox("Persona già in anagrafica (soci, dirigenti…) oppure nuova", list(opzioni_pers),
+                                    help="Clicca e scrivi una parte del nome o del codice fiscale per filtrare l'elenco.")
             n1, n2 = st.columns(2)
             nuovo_nome = n1.text_input("Cognome e nome (solo per una nuova persona)")
             nuovo_cf = n2.text_input("Codice fiscale (solo per una nuova persona)")
@@ -2677,7 +2679,8 @@ def pagina_lavoro_sportivo():
         if not df_staff.empty:
             with st.expander("✏️ Modifica o elimina un collaboratore"):
                 coll_mod = {f"{r.denominazione} ({r.mansione})": r for r in df_staff.itertuples()}
-                sel_mod = st.selectbox("Collaboratore", list(coll_mod), key="coll_mod_sel")
+                sel_mod = st.selectbox("Collaboratore", list(coll_mod), key="coll_mod_sel",
+                                       help="Clicca e scrivi una parte del nome per filtrare l'elenco.")
                 r_mod = coll_mod[sel_mod]
                 with st.form(f"modifica_collaboratore_{r_mod.id}"):
                     m1, m2, m3 = st.columns(3)
@@ -2721,7 +2724,8 @@ def pagina_lavoro_sportivo():
             st.caption("Contributi e ritenute sono una stima per avere un'idea dei costi: vanno verificati con il consulente del lavoro.")
 
             with st.form("nuovo_compenso", clear_on_submit=True):
-                staff_sel = st.selectbox("Seleziona Collaboratore Sportivo", list(staff_dict.keys()))
+                staff_sel = st.selectbox("Seleziona Collaboratore Sportivo", list(staff_dict.keys()),
+                                         help="Clicca e scrivi una parte del nome per filtrare l'elenco.")
                 c1, c2, c3 = st.columns(3)
                 data_erog = c1.date_input("Data Erogazione", format="DD/MM/YYYY")
                 anno_erog = str(data_erog.year)
@@ -2861,7 +2865,8 @@ def pagina_lavoro_sportivo():
         if not df_anag_sport.empty:
             a_dict = {row["denominazione"]: int(row["id"]) for _, row in df_anag_sport.iterrows()}
             with st.form("nuovo_rimborso", clear_on_submit=True):
-                atleta_sel = st.selectbox("Atleta / Dirigente in Trasferta", list(a_dict.keys()))
+                atleta_sel = st.selectbox("Atleta / Dirigente in Trasferta", list(a_dict.keys()),
+                                          help="Clicca e scrivi una parte del nome per filtrare l'elenco.")
 
                 r1, r2, r3 = st.columns(3)
                 data_partita = r1.date_input("Data Partita di Campionato")
@@ -3276,7 +3281,7 @@ def pagina_prima_nota():
                     st.caption("Nessuna anagrafica di questo tipo.")
                     continue
                 scelti = st.multiselect("Chi deve ancora pagare", [int(x) for x in elenco["id"]], format_func=lambda x: nomi.get(x, str(x)),
-                                        key=ka + tipo, placeholder="Scegli dall'elenco")
+                                        key=ka + tipo, placeholder="Scrivi il nome per cercare o scegli dall'elenco")
                 for aid in scelti:
                     cc = st.columns([3, 1, 3])
                     cc[0].markdown(f"**{nomi.get(aid, aid)}**")
@@ -4220,7 +4225,7 @@ def pagina_squadra():
                 scad = gioc_cat.loc[gioc_cat["id"] == aid, "scad"].iloc[0]
                 valido = pd.notna(scad) and str(scad) >= str(data_cv)
                 return nomi_sq[aid] + ("" if valido else " ⛔ certificato non valido")
-            conv_cv = st.multiselect("Convocati", list(nomi_sq), format_func=etichetta_conv, placeholder="Scegli i giocatori")
+            conv_cv = st.multiselect("Convocati", list(nomi_sq), format_func=etichetta_conv, placeholder="Scrivi il nome per cercare o scegli i giocatori")
             note_cv = st.text_area("Note per i convocati (facoltative)", height=70, placeholder="es. portare la tuta di rappresentanza")
             if st.form_submit_button("💾 Salva la convocazione", type="primary"):
                 if not conv_cv:
