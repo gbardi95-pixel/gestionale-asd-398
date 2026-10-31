@@ -669,6 +669,8 @@ def init_db(versione_schema=None):
         "ALTER TABLE fatture_passive ADD COLUMN xml_base64 TEXT;",
         "ALTER TABLE fatture_passive ADD COLUMN data_scadenza TEXT;",
         "ALTER TABLE fatture_sponsor_398 ADD COLUMN xml_base64 TEXT;",
+        # Distinta nata da una convocazione della squadra (per non riproporla due volte)
+        "ALTER TABLE distinte_gara ADD COLUMN evento_id INTEGER;",
     ):
         try:
             cursor.execute(alter_sql)

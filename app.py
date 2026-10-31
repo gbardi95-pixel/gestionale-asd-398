@@ -21,7 +21,7 @@ from modules.db import ERRORE_ESERCIZIO_CHIUSO, PIANO_DEI_CONTI_ASD, _turso_cred
 # ---------------------------------------------------------
 # Incrementare a ogni modifica dello schema del DB: forza init_db() (e le migrazioni)
 # anche quando Streamlit Cloud aggiorna il codice senza riavviare il server.
-VERSIONE_SCHEMA_DB = 17
+VERSIONE_SCHEMA_DB = 18
 
 @st.cache_resource(show_spinner="Avvio dell'app…")
 def _setup_database(versione_schema):
@@ -400,6 +400,9 @@ def docx_distinta(distinta_id):
     df_r = leggi_df("SELECT * FROM distinte_gara_righe WHERE distinta_id = ? ORDER BY ordine", [int(distinta_id)])
     testata = {k: valore_pulito(v) for k, v in df_t.iloc[0].items()}
     righe = [{k: valore_pulito(v) for k, v in r.items()} for r in df_r.to_dict("records")]
+    # Giocatori in ordine alfabetico anche per le distinte salvate prima di questa regola
+    righe = sorted((r for r in righe if r["sezione"] == "GIOCATORE"), key=lambda r: str(r["nominativo"]).casefold()) + \
+        [r for r in righe if r["sezione"] != "GIOCATORE"]
     return distinte.genera_docx(modello_distinta_bytes(), distinte.contesto_distinta(testata, righe, NOME_SOCIETA))
 
 def post_journal(conn, data_reg, num_doc, causale, tipo_att, righe):
@@ -1857,15 +1860,30 @@ def pagina_distinte():
 
     with tab_compila:
         etichette = {0: "➕ Nuova distinta"}
+        # Convocazioni fatte dalla parte sportiva che non hanno ancora una distinta: la segreteria le trova già pronte
+        df_conv = leggi_df(
+            "SELECT e.id, e.data, e.ora, e.categoria, e.avversario, e.luogo FROM eventi_squadra e "
+            "WHERE e.tipo = 'PARTITA' AND e.data >= ? AND NOT EXISTS (SELECT 1 FROM distinte_gara d WHERE d.evento_id = e.id) "
+            "ORDER BY e.data, e.id", [str(datetime.date.today() - datetime.timedelta(days=30))])
+        if utenti.limita_squadre(utente_corrente()["ruolo"]):
+            df_conv = df_conv[df_conv["categoria"].isin(utente_corrente()["squadre"])]
+        conv_righe = {f"c{int(r.id)}": r for r in df_conv.itertuples()}
+        for chiave_cv, r in conv_righe.items():
+            etichette[chiave_cv] = (f"📣 Dalla convocazione del {pd.Timestamp(r.data).strftime('%d/%m/%Y')}"
+                                    + (f" contro {r.avversario}" if r.avversario else "")
+                                    + f" ({ETICHETTE_SQUADRE.get(r.categoria, r.categoria)}) - da completare")
         for r in df_archivio.itertuples():
             etichette[int(r.id)] = f"{pd.Timestamp(r.data_gara).strftime('%d/%m/%Y')} - {r.squadra_casa or '?'} vs {r.squadra_ospite or '?'}"
         if "dist_sel_prossima" in st.session_state:  # dopo il salvataggio di una nuova distinta si passa alla distinta salvata
             st.session_state["dist_sel"] = st.session_state.pop("dist_sel_prossima")
         if st.session_state.get("dist_sel") not in etichette:
             st.session_state.pop("dist_sel", None)
-        did = st.selectbox("Distinta da compilare", list(etichette), format_func=etichette.get, key="dist_sel",
-                           help="Scegli una distinta dell'archivio per correggerla, oppure creane una nuova.")
-        k = f"dist{did}_"
+        scelta_dist = st.selectbox("Distinta da compilare", list(etichette), format_func=etichette.get, key="dist_sel",
+                                   help="Scegli una distinta dell'archivio per correggerla, creane una nuova, oppure parti da una convocazione "
+                                        "già fatta dalla parte sportiva: giocatori e dati della partita arrivano già compilati.")
+        conv_sel = conv_righe.get(scelta_dist)
+        did = 0 if conv_sel is not None else scelta_dist
+        k = f"distc{conv_sel.id}_" if conv_sel is not None else f"dist{did}_"
 
         # Dati salvati (modifica) oppure, per una nuova distinta, lo staff dell'ultima distinta come proposta
         id_base = did or (int(df_archivio["id"].iloc[0]) if not df_archivio.empty else 0)
@@ -1895,6 +1913,11 @@ def pagina_distinte():
         righe_sal = [{c: valore_pulito(v) for c, v in r.items()} for r in df_r_sal.to_dict("records")]
         if not did:
             righe_sal = [r for r in righe_sal if r["sezione"] == "DIRIGENTE"]
+        conv_ids = []
+        if conv_sel is not None:  # la partita arriva dalla convocazione; l'avversario è la squadra ospite, da correggere se si gioca fuori
+            testata_sal = {"data_gara": str(conv_sel.data), "ora": conv_sel.ora, "campo": conv_sel.luogo, "squadra_ospite": conv_sel.avversario}
+            conv_ids = [int(x) for x in leggi_df("SELECT anagrafica_id FROM presenze_evento WHERE evento_id = ? AND stato = 'CONVOCATO'",
+                                                 [int(conv_sel.id)])["anagrafica_id"]]
         sal_gioc = {r["anagrafica_id"]: r for r in righe_sal if r["sezione"] == "GIOCATORE" and r.get("anagrafica_id")}
         sal_dir = {r["anagrafica_id"]: r for r in righe_sal if r["sezione"] == "DIRIGENTE" and r.get("anagrafica_id")}
 
@@ -1932,14 +1955,22 @@ def pagina_distinte():
         ammessi = [pid for pid, m in esclusi.items() if not m]
 
         st.markdown("##### Giocatori")
-        def_gioc = [pid for pid in sal_gioc if pid in ammessi]
-        non_piu_ammessi = [pid for pid in sal_gioc if pid not in ammessi]
+        if conv_sel is not None:
+            def_gioc = [pid for pid in conv_ids if pid in ammessi]
+            non_piu_ammessi = [pid for pid in conv_ids if pid not in ammessi]
+            st.info("Giocatori e dati della partita arrivano dalla convocazione: controlla la squadra di casa, aggiungi le persone autorizzate "
+                    "ad accedere al terreno di gioco e salva.")
+        else:
+            def_gioc = [pid for pid in sal_gioc if pid in ammessi]
+            non_piu_ammessi = [pid for pid in sal_gioc if pid not in ammessi]
         if non_piu_ammessi:
             st.warning("Tolti dalla distinta perché alla data della gara non possono giocare: " + ", ".join(
-                f"{pers[pid]['denominazione']} ({esclusi[pid]})" if pid in pers else str(sal_gioc[pid]["nominativo"]) for pid in non_piu_ammessi))
-        sel_gioc = st.multiselect("Giocatori convocati (nell'ordine della distinta)", ammessi, default=def_gioc,
+                f"{pers[pid]['denominazione']} ({esclusi[pid]})" if pid in pers else str((sal_gioc.get(pid) or {}).get("nominativo", pid))
+                for pid in non_piu_ammessi))
+        sel_gioc = st.multiselect("Giocatori convocati (in distinta compaiono in ordine alfabetico)", ammessi, default=def_gioc,
                                   format_func=lambda pid: pers[pid]["denominazione"], key=k + "gioc",
                                   placeholder="Scrivi il nome per cercare o scegli i giocatori")
+        sel_gioc = sorted(sel_gioc, key=lambda pid: pers[pid]["denominazione"].casefold())
         with st.expander(f"🚫 Non selezionabili alla data della gara ({sum(1 for pid, m in esclusi.items() if m and pers[pid].get('gioca'))})"):
             st.caption("Solo chi gioca, ha il numero di tessera e un certificato medico valido il giorno della gara può essere messo in distinta.")
             for pid, m in esclusi.items():
@@ -2033,9 +2064,9 @@ def pagina_distinte():
                         id_salvata = int(did)
                     else:
                         id_salvata = int(w_conn.execute(
-                            "INSERT INTO distinte_gara (data_gara, ora, campo, squadra_casa, squadra_ospite, competizione, colori_maglie, creata_il) "
-                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                            valori + [adesso],
+                            "INSERT INTO distinte_gara (data_gara, ora, campo, squadra_casa, squadra_ospite, competizione, colori_maglie, creata_il, evento_id) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            valori + [adesso, int(conv_sel.id) if conv_sel is not None else None],
                         ).lastrowid)
                     for ordine, r in enumerate(righe_gioc + righe_dir):
                         w_conn.execute(
@@ -2055,7 +2086,7 @@ def pagina_distinte():
                                            [r["tipo_tessera"], int(r["anagrafica_id"])])
                 if not did:
                     st.session_state["dist_sel_prossima"] = id_salvata
-                    for chiave in [c for c in st.session_state if str(c).startswith("dist0_")]:
+                    for chiave in [c for c in st.session_state if str(c).startswith(k)]:
                         del st.session_state[chiave]  # la prossima "Nuova distinta" riparte vuota
                 st.session_state["flash"] = "Distinta salvata: scaricala qui sotto o dall'Archivio."
                 st.rerun()
@@ -2078,7 +2109,7 @@ def pagina_distinte():
                                                 "campo": "Campo", "competizione": "Competizione", "giocatori": "Giocatori"}).drop(columns=["id"])
             vista["Data"] = pd.to_datetime(vista["Data"]).dt.strftime("%d/%m/%Y")
             st.dataframe(vista, width="stretch", hide_index=True)
-            id_arch = st.selectbox("Distinta", [i for i in etichette if i], format_func=etichette.get, key="arch_sel")
+            id_arch = st.selectbox("Distinta", [i for i in etichette if isinstance(i, int) and i], format_func=etichette.get, key="arch_sel")
             ca, cb = st.columns(2)
             try:
                 ca.download_button("📥 Scarica (Word)", docx_distinta(id_arch), file_name=f"distinta_{id_arch}.docx",
