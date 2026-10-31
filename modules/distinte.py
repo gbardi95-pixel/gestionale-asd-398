@@ -2,6 +2,10 @@
 import datetime
 import io
 import os
+import pathlib
+import shutil
+import subprocess
+import tempfile
 
 import jinja2
 from docxtpl import DocxTemplate
@@ -100,3 +104,37 @@ def genera_docx(modello_bytes, contesto):
     out = io.BytesIO()
     modello.save(out)
     return out.getvalue()
+
+
+def _programma_libreoffice():
+    """Percorso di LibreOffice (serve solo per il PDF), None se non è installato."""
+    trovato = shutil.which("soffice") or shutil.which("libreoffice")
+    if trovato:
+        return trovato
+    for base in (os.environ.get("ProgramFiles", ""), os.environ.get("ProgramFiles(x86)", "")):
+        candidato = os.path.join(base, "LibreOffice", "program", "soffice.exe")
+        if base and os.path.exists(candidato):
+            return candidato
+    return None
+
+
+def docx_in_pdf(contenuto, timeout=120):
+    """Converte un file Word in PDF con LibreOffice (stesso aspetto del Word, logo e filigrana compresi)."""
+    programma = _programma_libreoffice()
+    if not programma:
+        raise RuntimeError("per il PDF serve LibreOffice, che qui non è disponibile: scarica il file Word")
+    with tempfile.TemporaryDirectory() as cartella:
+        sorgente = os.path.join(cartella, "distinta.docx")
+        with open(sorgente, "wb") as f:
+            f.write(contenuto)
+        profilo = pathlib.Path(cartella, "profilo").as_uri()  # profilo proprio: niente conflitti con altre conversioni
+        try:
+            subprocess.run([programma, f"-env:UserInstallation={profilo}", "--headless", "--convert-to", "pdf", "--outdir", cartella, sorgente],
+                           capture_output=True, timeout=timeout, check=False)
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("la conversione in PDF ha impiegato troppo tempo: riprova o scarica il file Word")
+        percorso_pdf = os.path.join(cartella, "distinta.pdf")
+        if not os.path.exists(percorso_pdf):
+            raise RuntimeError("conversione in PDF non riuscita: scarica il file Word")
+        with open(percorso_pdf, "rb") as f:
+            return f.read()

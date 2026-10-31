@@ -405,6 +405,20 @@ def docx_distinta(distinta_id):
         [r for r in righe if r["sezione"] != "GIOCATORE"]
     return distinte.genera_docx(modello_distinta_bytes(), distinte.contesto_distinta(testata, righe, NOME_SOCIETA))
 
+def pulsante_pdf_distinta(distinta_id, chiave):
+    """«Prepara il PDF» (la conversione richiede qualche secondo) e poi il download; il PDF vale per la versione salvata."""
+    stato = f"pdf_distinta_{int(distinta_id)}"
+    if st.button("📄 Prepara il PDF", key=chiave + "_prep", help="Crea il PDF identico al file Word, pronto da stampare."):
+        try:
+            with st.spinner("Preparo il PDF…"):
+                st.session_state[stato] = distinte.docx_in_pdf(docx_distinta(distinta_id))
+        except Exception as ex_pdf:
+            st.session_state.pop(stato, None)
+            st.error(f"PDF non creato: {ex_pdf}")
+    if stato in st.session_state:
+        st.download_button("📥 Scarica il PDF", st.session_state[stato], file_name=f"distinta_{int(distinta_id)}.pdf",
+                           mime="application/pdf", key=chiave + "_dl")
+
 def post_journal(conn, data_reg, num_doc, causale, tipo_att, righe):
     """
     Registra una scrittura di Prima Nota a Partita Doppia bilanciata.
@@ -2088,6 +2102,7 @@ def pagina_distinte():
                     st.session_state["dist_sel_prossima"] = id_salvata
                     for chiave in [c for c in st.session_state if str(c).startswith(k)]:
                         del st.session_state[chiave]  # la prossima "Nuova distinta" riparte vuota
+                st.session_state.pop(f"pdf_distinta_{id_salvata}", None)
                 st.session_state["flash"] = "Distinta salvata: scaricala qui sotto o dall'Archivio."
                 st.rerun()
             except Exception as ex_dist:
@@ -2097,6 +2112,7 @@ def pagina_distinte():
             try:
                 st.download_button("📥 Scarica distinta salvata (Word)", docx_distinta(did), file_name=f"distinta_{did}.docx",
                                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document", key=f"scarica_{did}")
+                pulsante_pdf_distinta(did, f"pdf_comp_{did}")
                 st.caption("Il file contiene la versione salvata: se hai cambiato qualcosa sopra, salva prima di scaricare.")
             except Exception as ex_docx:
                 st.error(f"Errore nella compilazione del modello Word: {ex_docx}")
@@ -2116,6 +2132,8 @@ def pagina_distinte():
                                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document", key=f"arch_dl_{id_arch}")
             except Exception as ex_docx:
                 ca.error(f"Errore nella compilazione del modello Word: {ex_docx}")
+            with ca:
+                pulsante_pdf_distinta(id_arch, f"pdf_arch_{id_arch}")
             conferma = cb.checkbox("Confermo l'eliminazione", key=f"arch_conf_{id_arch}")
             if cb.button("🗑️ Elimina distinta", disabled=not conferma, key=f"arch_del_{id_arch}"):
                 try:
